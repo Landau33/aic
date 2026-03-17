@@ -21,6 +21,7 @@ ros-kilted-aic-example-policies = { path = "aic_example_policies" }
 ros-kilted-aic-model = { path = "aic_model" }
 ros-kilted-aic-model-interfaces = { path = "aic_interfaces/aic_model_interfaces" }
 ros-kilted-aic-task-interfaces = { path = "aic_interfaces/aic_task_interfaces" }
+ros-kilted-aic-toolkit = { path = "aic_toolkit" }
 ros-kilted-aic-teleoperation = { path = "aic_utils/aic_teleoperation" }
 ros-kilted-control-msgs = "*"                                                          # lerobot_robot_ros
 ros-kilted-geometry-msgs = "*"                                                         # lerobot_robot_ros
@@ -34,6 +35,10 @@ ros-kilted-std-msgs = "*"                                                       
 ros-kilted-std-srvs = "*"
 ros-kilted-tf2-ros-py = "*"
 setuptools = ">=71.0.0,<81.0.0"                                                        # required by lerobot==0.4.3
+ros-kilted-cv-bridge = ">=4.1.0,<5"
+scipy = ">=1.17.1,<2"
+ultralytics = ">=8.4.21,<9"
+ros-kilted-tf2-geometry-msgs = ">=0.41.6,<0.42"
 
 [pypi-dependencies]
 huggingface-hub = { version = "==0.35.3", extras = ["hf-transfer", "cli"] }
