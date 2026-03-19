@@ -513,8 +513,6 @@ environments:
         build: hb0f4dca_0
       - conda: aic_model
         build: hb0f4dca_0
-      - conda: aic_toolkit
-        build: hb0f4dca_0
       - conda: aic_utils/aic_teleoperation
         build: hb0f4dca_0
       - conda: aic_utils/lerobot_robot_aic
@@ -1050,8 +1048,6 @@ environments:
       - conda: aic_interfaces/aic_task_interfaces
         build: h60d57d3_0
       - conda: aic_model
-        build: h60d57d3_0
-      - conda: aic_toolkit
         build: h60d57d3_0
       - conda: aic_utils/aic_teleoperation
         build: h60d57d3_0
@@ -8680,62 +8676,6 @@ packages:
   - libstdcxx >=15
   - python_abi 3.12.* *_cp312
   - numpy >=1.23,<3
-  license: LicenseRef-Apache-2.0
-- conda: aic_toolkit
-  name: ros-kilted-aic-toolkit
-  version: 0.0.1
-  build: h60d57d3_0
-  subdir: osx-arm64
-  variants:
-    target_platform: osx-arm64
-  depends:
-  - numpy
-  - numpy >=1.23,<3
-  - py-opencv
-  - libopencv
-  - scipy
-  - ros-kilted-ament-index-python
-  - ros-kilted-aic-control-interfaces
-  - ros-kilted-cv-bridge
-  - ros-kilted-geometry-msgs
-  - ros-kilted-message-filters
-  - ros-kilted-rclpy
-  - ros-kilted-sensor-msgs
-  - ros-kilted-tf2-geometry-msgs
-  - ros-kilted-tf2-ros
-  - ros2-distro-mutex
-  - ros2-distro-mutex >=0.13.0,<0.14.0a0
-  - libcxx >=22
-  - python_abi 3.12.* *_cp312
-  license: LicenseRef-Apache-2.0
-- conda: aic_toolkit
-  name: ros-kilted-aic-toolkit
-  version: 0.0.1
-  build: hb0f4dca_0
-  subdir: linux-64
-  variants:
-    target_platform: linux-64
-  depends:
-  - numpy
-  - numpy >=1.23,<3
-  - py-opencv
-  - libopencv
-  - scipy
-  - ros-kilted-ament-index-python
-  - ros-kilted-aic-control-interfaces
-  - ros-kilted-cv-bridge
-  - ros-kilted-geometry-msgs
-  - ros-kilted-message-filters
-  - ros-kilted-rclpy
-  - ros-kilted-sensor-msgs
-  - ros-kilted-tf2-geometry-msgs
-  - ros-kilted-tf2-ros
-  - ros2-distro-mutex
-  - ros2-distro-mutex >=0.13.0,<0.14.0a0
-  - libgcc >=15
-  - libgcc >=15
-  - libstdcxx >=15
-  - python_abi 3.12.* *_cp312
   license: LicenseRef-Apache-2.0
 - conda: https://conda.anaconda.org/robostack-kilted/linux-64/ros-kilted-ament-cmake-2.7.4-np2py312h2ed9cc7_15.conda
   sha256: 04d2c3366ffca89ad11ea4c2ace80875007da2558bff58116c9e94efb44bf752
