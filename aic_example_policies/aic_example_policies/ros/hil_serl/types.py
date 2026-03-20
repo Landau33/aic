@@ -14,23 +14,39 @@
 #  limitations under the License.
 #
 
-"""AIC 与 HIL-SERL 桥接层使用的共享类型。
+"""AIC 与 HIL-SERL 推理桥接层的共享类型。"""
 
-这个模块的目标是把以下几层边界显式定义清楚：
-- 来自 AIC 的原始 ROS 消息
-- 送入 SERL 模型前的观测结构
-- 模型输出的原始动作
-- 最终可下发给控制器的笛卡尔命令
+from dataclasses import dataclass
+from typing import Any
 
-这些类型应尽量保持轻量、清晰，并在可能时便于序列化。
-它们主要用于提升集成边界的可读性，并让后续实现更容易单测。
+import numpy as np
 
-后续可能包含的类型：
-- `HilSerlObservationBatch`：已归一化或半归一化的模型输入
-- `HilSerlAction`：机器人相关缩放前的模型输出
-- `CartesianVelocityCommand`：线速度、角速度及附带元信息
-- `DeepInsertStatus`：用于日志和反馈的运行期状态快照
-"""
 
-# TODO: 等上游 HIL-SERL task wrapper 的 observation / action 结构确认后，
-# 在这里补充 dataclass 或 TypedDict。
+ObservationDict = dict[str, np.ndarray]
+
+
+@dataclass
+class HilSerlAction:
+    """模型输出的原始动作。"""
+
+    values: np.ndarray
+
+
+@dataclass
+class CartesianVelocityCommand:
+    """下发给 AIC 控制器之前的笛卡尔速度命令。"""
+
+    linear_xyz: np.ndarray
+    angular_xyz: np.ndarray
+
+
+@dataclass
+class DeepInsertStatus:
+    """deep-insert 控制循环中的状态快照。"""
+
+    step_index: int
+    elapsed_sec: float
+    waiting_handoff: bool = False
+    missing_observation_count: int = 0
+    latest_feedback: str = ""
+    extra: dict[str, Any] | None = None

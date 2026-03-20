@@ -14,28 +14,93 @@
 #  limitations under the License.
 #
 
-"""AIC 内运行 HIL-SERL 所需的配置定义。
+"""AIC 中运行 HIL-SERL actor 推理所需的配置。"""
 
-这个模块后续建议只放小型 dataclass，用来统一管理部署期参数，
-避免把常量分散在 `TestPolicy`、观测适配器和模型运行时里。
+from dataclasses import dataclass, field
+from pathlib import Path
 
-典型配置分类：
-- 模型 checkpoint 路径与 checkpoint 格式
-- 模型类型选择：BC / SAC / hybrid SAC
-- 运行设备：CPU / CUDA
-- 控制频率与观测历史长度
-- 图像缩放和归一化参数
-- 动作缩放、裁剪、平滑和死区
-- 力/力矩安全阈值
-- deep-insert 阶段进入/退出所用 topic
 
-这个模块应保持为纯配置层，不要引入 ROS 副作用。
-这里只定义配置结构和构造辅助函数。
-"""
+@dataclass(frozen=True)
+class HilSerlTopicConfig:
+    """与阶段切换和可选外部控制相关的 topic 配置。"""
 
-# TODO: 后续补充 dataclass，例如：
-# - HilSerlModelConfig
-# - HilSerlControlConfig
-# - HilSerlSafetyConfig
-# - HilSerlTopicConfig
-# - HilSerlRuntimeConfig
+    deep_insert_topic: str = "/aic/deep_insert"
+
+
+@dataclass(frozen=True)
+class HilSerlModelConfig:
+    """HIL-SERL actor 模型相关配置。"""
+
+    exp_name: str = "ram_insertion"
+    setup_mode: str = "single-arm-fixed-gripper"
+    checkpoint_path: str = "/home/young/ws_aic/hil-serl/examples/experiments/ram_insertion/first_run"
+    checkpoint_step: int = 0
+    seed: int = 42
+    argmax: bool = False
+    encoder_type: str = "resnet-pretrained"
+    action_dim: int = 6
+    image_keys: tuple[str, ...] = ("left_camera", "center_camera", "right_camera")
+
+
+@dataclass(frozen=True)
+class HilSerlObservationConfig:
+    """把 AIC Observation 对齐到 HIL-SERL 输入时需要的配置。"""
+
+    image_width: int = 128
+    image_height: int = 128
+    image_keys: tuple[str, ...] = ("left_camera", "center_camera", "right_camera")
+    aic_image_topics: tuple[str, ...] = ("left", "center", "right")
+    observation_horizon: int = 1
+    proprio_keys: tuple[str, ...] = (
+        "tcp_pose",
+        "tcp_vel",
+        "tcp_error",
+        "joint_positions",
+        "joint_velocities",
+        "joint_efforts",
+        "wrist_force",
+        "wrist_torque",
+    )
+
+
+@dataclass(frozen=True)
+class HilSerlControlConfig:
+    """把 actor 输出映射成 AIC 速度控制命令时使用的参数。"""
+
+    control_period_sec: float = 0.10
+    action_scale_linear: float = 0.01
+    action_scale_angular: float = 0.06
+    max_linear_speed: float = 0.02
+    max_angular_speed: float = 0.20
+    linear_deadband: float = 1e-4
+    angular_deadband: float = 1e-4
+
+
+@dataclass(frozen=True)
+class HilSerlSafetyConfig:
+    """deep-insert 阶段的保守安全参数。"""
+
+    max_runtime_sec: float = 30.0
+    max_abs_force_z: float = 20.0
+    max_abs_force_xy: float = 20.0
+    max_abs_torque_xyz: float = 4.0
+    max_consecutive_missing_obs: int = 10
+
+
+@dataclass(frozen=True)
+class HilSerlRuntimeConfig:
+    """AIC 侧 HIL-SERL actor 推理的总配置。"""
+
+    model: HilSerlModelConfig = field(default_factory=HilSerlModelConfig)
+    observation: HilSerlObservationConfig = field(default_factory=HilSerlObservationConfig)
+    control: HilSerlControlConfig = field(default_factory=HilSerlControlConfig)
+    safety: HilSerlSafetyConfig = field(default_factory=HilSerlSafetyConfig)
+    topics: HilSerlTopicConfig = field(default_factory=HilSerlTopicConfig)
+
+    @property
+    def workspace_root(self) -> Path:
+        return Path("/home/young/ws_aic")
+
+    @property
+    def hil_serl_root(self) -> Path:
+        return self.workspace_root / "hil-serl"
