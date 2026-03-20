@@ -44,8 +44,6 @@ import copy
 import math
 
 import rclpy
-from action_msgs.msg import GoalStatus
-from rclpy.action import ActionClient
 from rclpy.node import Node
 from rclpy.duration import Duration
 from rclpy.executors import ExternalShutdownException
@@ -58,10 +56,9 @@ from geometry_msgs.msg import Pose, Twist, Wrench, WrenchStamped, Vector3, Quate
 from aic_control_interfaces.msg import (
     MotionUpdate,
     TrajectoryGenerationMode,
-    TargetMode,
     ControllerState
 )
-from aic_task_interfaces.action import InsertCable
+from std_msgs.msg import String
 
 
 class AICCartesianTrajectoryNode(Node):
@@ -81,18 +78,9 @@ class AICCartesianTrajectoryNode(Node):
         self.declare_parameter("spiral_omega", 3.0)            # 旋转角速度 (rad/s)
         self.declare_parameter("spiral_max_time", 20.0)        # 最大搜索时间 (s)
         self.declare_parameter("spiral_z_velocity", -0.005)    # 搜索时Z轴下压速度，保持贴合
-        # ======================== TestPolicy handoff参数 ========================
+        # ======================== Deep Insert handoff参数 ========================
         self.declare_parameter("handoff_to_test_policy", True)
-        self.declare_parameter("insert_cable_action_name", "insert_cable")
-        self.declare_parameter("task_id", "motion_planning_deep_insertion")
-        self.declare_parameter("task_cable_type", "sfp_sc")
-        self.declare_parameter("task_cable_name", "cable_0")
-        self.declare_parameter("task_plug_type", "sfp")
-        self.declare_parameter("task_plug_name", "sfp_tip")
-        self.declare_parameter("task_port_type", "sfp")
-        self.declare_parameter("task_port_name", "sfp_port_0")
-        self.declare_parameter("task_target_module_name", "nic_card_mount_0")
-        self.declare_parameter("task_time_limit_sec", 60)
+        self.declare_parameter("deep_insert_topic", "/aic/deep_insert")
 
         self.duration_sec = self.get_parameter("duration_sec").value
         self.publish_rate = self.get_parameter("publish_rate").value
@@ -106,16 +94,7 @@ class AICCartesianTrajectoryNode(Node):
         self.spiral_max_time = self.get_parameter("spiral_max_time").value
         self.spiral_z_velocity = self.get_parameter("spiral_z_velocity").value
         self.handoff_to_test_policy = self.get_parameter("handoff_to_test_policy").value
-        self.insert_cable_action_name = self.get_parameter("insert_cable_action_name").value
-        self.task_id = self.get_parameter("task_id").value
-        self.task_cable_type = self.get_parameter("task_cable_type").value
-        self.task_cable_name = self.get_parameter("task_cable_name").value
-        self.task_plug_type = self.get_parameter("task_plug_type").value
-        self.task_plug_name = self.get_parameter("task_plug_name").value
-        self.task_port_type = self.get_parameter("task_port_type").value
-        self.task_port_name = self.get_parameter("task_port_name").value
-        self.task_target_module_name = self.get_parameter("task_target_module_name").value
-        self.task_time_limit_sec = self.get_parameter("task_time_limit_sec").value
+        self.deep_insert_topic = self.get_parameter("deep_insert_topic").value
         
         self.get_logger().info(f"Trajectory duration: {self.duration_sec} s")
         self.get_logger().info(f"Publish rate: {self.publish_rate} Hz")
@@ -132,10 +111,10 @@ class AICCartesianTrajectoryNode(Node):
             f"/{self.controller_ns}/pose_commands",
             10
         )
-        self.insert_cable_client = ActionClient(
-            self,
-            InsertCable,
-            self.insert_cable_action_name,
+        self.deep_insert_pub = self.create_publisher(
+            String,
+            self.deep_insert_topic,
+            10,
         )
 
         # 等待有订阅者
@@ -174,10 +153,7 @@ class AICCartesianTrajectoryNode(Node):
         self.pause_start = None         # 暂停开始时间戳
         self.spiral_search_active = False    # 是否正在执行Spiral Search
         self.spiral_start_time = None   # 记录螺旋搜索开始的时间
-        self.policy_handoff_active = False
-        self.policy_goal_sent = False
-        self.policy_goal_done = False
-        self.policy_goal_handle = None
+        self.deep_insert_sent = False
 
         # 25 Hz 定时器
         self.timer_period = 1.0 / self.publish_rate
@@ -367,72 +343,13 @@ class AICCartesianTrajectoryNode(Node):
 
         return msg
 
-    def send_test_policy_goal(self):
-        if self.policy_goal_sent:
-            return
-
-        if not self.insert_cable_client.wait_for_server(timeout_sec=1.0):
-            self.get_logger().warn(
-                f"InsertCable action server '{self.insert_cable_action_name}' not available. "
-                "Keeping robot stopped."
-            )
-            return
-
-        goal_msg = InsertCable.Goal()
-        goal_msg.task.id = self.task_id
-        goal_msg.task.cable_type = self.task_cable_type
-        goal_msg.task.cable_name = self.task_cable_name
-        goal_msg.task.plug_type = self.task_plug_type
-        goal_msg.task.plug_name = self.task_plug_name
-        goal_msg.task.port_type = self.task_port_type
-        goal_msg.task.port_name = self.task_port_name
-        goal_msg.task.target_module_name = self.task_target_module_name
-        goal_msg.task.time_limit = int(self.task_time_limit_sec)
-
+    def publish_deep_insert_true(self):
+        msg = String()
+        msg.data = "true"
+        self.deep_insert_pub.publish(msg)
         self.get_logger().info(
-            f"Sending InsertCable goal to TestPolicy via '{self.insert_cable_action_name}' "
-            f"for task_id={self.task_id}"
+            f"Published deep_insert=true on '{self.deep_insert_topic}'"
         )
-        self.policy_goal_sent = True
-        future = self.insert_cable_client.send_goal_async(
-            goal_msg,
-            feedback_callback=self.insert_cable_feedback_callback,
-        )
-        future.add_done_callback(self.insert_cable_goal_response_callback)
-
-    def insert_cable_feedback_callback(self, feedback_msg):
-        self.get_logger().info(
-            f"TestPolicy feedback: {feedback_msg.feedback.message}"
-        )
-
-    def insert_cable_goal_response_callback(self, future):
-        goal_handle = future.result()
-        if not goal_handle.accepted:
-            self.get_logger().warn("InsertCable goal rejected by TestPolicy.")
-            self.policy_goal_done = True
-            self.policy_handoff_active = False
-            return
-
-        self.policy_goal_handle = goal_handle
-        self.get_logger().info("InsertCable goal accepted by TestPolicy.")
-        result_future = goal_handle.get_result_async()
-        result_future.add_done_callback(self.insert_cable_result_callback)
-
-    def insert_cable_result_callback(self, future):
-        result = future.result().result
-        status = future.result().status
-        self.policy_goal_done = True
-        self.policy_handoff_active = False
-
-        if status == GoalStatus.STATUS_SUCCEEDED:
-            self.get_logger().info(
-                f"TestPolicy finished. success={result.success}, message='{result.message}'"
-            )
-        else:
-            self.get_logger().warn(
-                f"InsertCable action ended with status={status}, "
-                f"success={result.success}, message='{result.message}'"
-            )
 
     def timer_callback(self):
         # 如果还没开始轨迹，尝试启动
@@ -441,7 +358,7 @@ class AICCartesianTrajectoryNode(Node):
                 self.trajectory_started = True  # 永久标记已启动
                 return
 
-        if self.policy_handoff_active or self.policy_goal_done:
+        if self.deep_insert_sent:
             return
 
         # ======================== 位置轨迹阶段 ========================
@@ -526,11 +443,11 @@ class AICCartesianTrajectoryNode(Node):
                 self.motion_pub.publish(msg)
 
                 if self.handoff_to_test_policy:
-                    self.policy_handoff_active = True
+                    self.deep_insert_sent = True
                     self.get_logger().info(
-                        "Stopping local spiral controller and handing off deep insertion to TestPolicy."
+                        "Stopping local spiral controller and publishing deep_insert=true."
                     )
-                    self.send_test_policy_goal()
+                    self.publish_deep_insert_true()
                 return
 
             # 计算阿基米德螺旋线速度
