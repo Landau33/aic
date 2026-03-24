@@ -79,8 +79,10 @@ class AICCartesianTrajectoryNode(Node):
         self.declare_parameter("spiral_max_time", 20.0)        # 最大搜索时间 (s)
         self.declare_parameter("spiral_z_velocity", -0.005)    # 搜索时Z轴下压速度，保持贴合
         # ======================== Deep Insert handoff参数 ========================
-        self.declare_parameter("handoff_to_test_policy", True)
-        self.declare_parameter("deep_insert_topic", "/aic/deep_insert")
+        self.declare_parameter("handoff_to_test_policy", True) 
+        self.declare_parameter("deep_insert_topic", "/aic/deep_insert") 
+        self.declare_parameter("handoff_lift_distance", 0.003) # 孔洞找到后提升的距离（m）
+        self.declare_parameter("handoff_hold_duration", 1.0) # 孔洞找到后保持的时间（s）
 
         self.duration_sec = self.get_parameter("duration_sec").value
         self.publish_rate = self.get_parameter("publish_rate").value
@@ -95,6 +97,8 @@ class AICCartesianTrajectoryNode(Node):
         self.spiral_z_velocity = self.get_parameter("spiral_z_velocity").value
         self.handoff_to_test_policy = self.get_parameter("handoff_to_test_policy").value
         self.deep_insert_topic = self.get_parameter("deep_insert_topic").value
+        self.handoff_lift_distance = self.get_parameter("handoff_lift_distance").value
+        self.handoff_hold_duration = self.get_parameter("handoff_hold_duration").value
         
         self.get_logger().info(f"Trajectory duration: {self.duration_sec} s")
         self.get_logger().info(f"Publish rate: {self.publish_rate} Hz")
@@ -104,6 +108,8 @@ class AICCartesianTrajectoryNode(Node):
         self.get_logger().info(f"Z velocity: {self.z_velocity} m/s")
         self.get_logger().info(f"Force threshold: {self.force_threshold} N")
         self.get_logger().info(f"Handoff to TestPolicy after hole found: {self.handoff_to_test_policy}")
+        self.get_logger().info(f"Handoff lift distance: {self.handoff_lift_distance} m")
+        self.get_logger().info(f"Handoff hold duration: {self.handoff_hold_duration} s")
 
         # ======================== 发布器 ========================
         self.motion_pub = self.create_publisher(
@@ -154,6 +160,12 @@ class AICCartesianTrajectoryNode(Node):
         self.spiral_search_active = False    # 是否正在执行Spiral Search
         self.spiral_start_time = None   # 记录螺旋搜索开始的时间
         self.deep_insert_sent = False
+        self.handoff_lift_active = False
+        self.handoff_hold_active = False
+        self.handoff_start_pose = None
+        self.handoff_hold_pose = None
+        self.handoff_lift_start_time = None
+        self.handoff_hold_start_time = None
 
         # 25 Hz 定时器
         self.timer_period = 1.0 / self.publish_rate
@@ -351,15 +363,51 @@ class AICCartesianTrajectoryNode(Node):
             f"Published deep_insert=true on '{self.deep_insert_topic}'"
         )
 
+    @staticmethod
+    def copy_pose(pose: Pose) -> Pose:
+        copied_pose = Pose()
+        copied_pose.position.x = pose.position.x
+        copied_pose.position.y = pose.position.y
+        copied_pose.position.z = pose.position.z
+        copied_pose.orientation = Quaternion(
+            x=pose.orientation.x,
+            y=pose.orientation.y,
+            z=pose.orientation.z,
+            w=pose.orientation.w,
+        )
+        return copied_pose
+
+    def start_handoff_hold(self):
+        current_pose = self.get_current_tcp_pose()
+        if current_pose is None:
+            self.get_logger().warn(
+                "Failed to get current TCP pose at handoff. Falling back to last target pose."
+            )
+            if self.target_pose is None:
+                return False
+            current_pose = self.copy_pose(self.target_pose)
+
+        self.handoff_start_pose = self.copy_pose(current_pose)
+        self.handoff_hold_pose = self.copy_pose(current_pose)
+        self.handoff_hold_pose.position.z += self.handoff_lift_distance
+        self.handoff_lift_start_time = self.get_clock().now()
+        self.handoff_hold_start_time = None
+        self.handoff_lift_active = True
+        self.handoff_hold_active = False
+        self.deep_insert_sent = False
+
+        self.get_logger().info(
+            "Hole found. Switching to handoff hold: "
+            f"lift {self.handoff_lift_distance:.4f} m then hold for {self.handoff_hold_duration:.2f} s."
+        )
+        return True
+
     def timer_callback(self):
         # 如果还没开始轨迹，尝试启动
         if not self.trajectory_active and not self.velocity_active and not hasattr(self, 'trajectory_started'):
             if self.start_trajectory():
                 self.trajectory_started = True  # 永久标记已启动
                 return
-
-        if self.deep_insert_sent:
-            return
 
         # ======================== 位置轨迹阶段 ========================
         if self.trajectory_active:
@@ -438,16 +486,17 @@ class AICCartesianTrajectoryNode(Node):
                     f"Hole found! Z Force dropped to {self.current_tare_offset_z:.2f} N."
                 )
                 self.spiral_search_active = False
-                
-                msg = self.generate_velocity_update(Twist()) 
+
+                msg = self.generate_velocity_update(Twist())
                 self.motion_pub.publish(msg)
 
-                if self.handoff_to_test_policy:
-                    self.deep_insert_sent = True
-                    self.get_logger().info(
-                        "Stopping local spiral controller and publishing deep_insert=true."
-                    )
-                    self.publish_deep_insert_true()
+                if not self.start_handoff_hold():
+                    self.get_logger().warn("Unable to start handoff hold. Stopping with zero twist only.")
+                    return
+
+                self.get_logger().info(
+                    "Starting local handoff lift/hold. deep_insert will be published after the hold phase."
+                )
                 return
 
             # 计算阿基米德螺旋线速度
@@ -468,6 +517,45 @@ class AICCartesianTrajectoryNode(Node):
                                                 damping_diag=[30.0, 30.0, 50.0, 75.0, 75.0, 75.0],
                                                 feedforward_wrench_at_tip=[0.0, 0.0, 5.0, 0.0, 0.0, 0.0])
             self.motion_pub.publish(msg)
+
+        # ======================== Handoff Lift阶段 ========================
+        elif self.handoff_lift_active:
+            now = self.get_clock().now()
+            elapsed = (now - self.handoff_lift_start_time).nanoseconds / 1e9
+            duration = max(float(self.handoff_hold_duration), 1e-3)
+            t = min(elapsed / duration, 1.0)
+
+            # Smoothstep gives zero velocity at the start/end of the lift.
+            alpha = t * t * (3.0 - 2.0 * t)
+            handoff_pose = self.copy_pose(self.handoff_start_pose)
+            handoff_pose.position.z = (
+                self.handoff_start_pose.position.z
+                + alpha * (self.handoff_hold_pose.position.z - self.handoff_start_pose.position.z)
+            )
+            msg = self.generate_position_update(handoff_pose)
+            self.motion_pub.publish(msg)
+
+            if t >= 1.0:
+                self.handoff_lift_active = False
+                self.handoff_hold_active = True
+                self.handoff_hold_start_time = self.get_clock().now()
+                self.get_logger().info("Handoff lift complete. Holding position for policy takeover.")
+
+        # ======================== Handoff Hold阶段 ========================
+        elif self.handoff_hold_active:
+            hold_elapsed = (self.get_clock().now() - self.handoff_hold_start_time).nanoseconds / 1e9
+            if hold_elapsed < self.handoff_hold_duration:
+                msg = self.generate_position_update(self.handoff_hold_pose)
+                self.motion_pub.publish(msg)
+            else:
+                self.handoff_hold_active = False
+                if self.handoff_to_test_policy and not self.deep_insert_sent:
+                    self.get_logger().info(
+                        "Handoff hold complete. Publishing deep_insert=true for policy takeover."
+                    )
+                    self.publish_deep_insert_true()
+                    self.deep_insert_sent = True
+                self.get_logger().info("Handoff hold complete. motion_planning stops publishing commands.")
         
         # ======================== 通用力控处理 ==============================
         if self.current_tared_wrench is None:

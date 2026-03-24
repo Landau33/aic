@@ -75,6 +75,10 @@ class TestPolicy(Policy):
         self.get_logger().info("进入 deep-insert 阶段，开始 HIL-SERL actor 推理。")
         send_feedback("deep_insert 已接管，初始化 HIL-SERL actor")
 
+        while True: 
+            time.sleep(1)
+            self.get_logger().info("准备进入推理，等待中...")
+
         init_obs_msg = self._wait_for_observation(get_observation)
         if init_obs_msg is None:
             self.get_logger().error("初始化失败：未收到 observation。")
