@@ -19,20 +19,17 @@
 import sys
 import time
 import rclpy
-import numpy as np
 from rclpy.executors import ExternalShutdownException
 
+from aic_engine_interfaces.srv import ResetJoints
+from aic_control_interfaces.msg import TargetMode
+from aic_control_interfaces.srv import ChangeTargetMode
+from controller_manager_msgs.srv import SwitchController
 from control_msgs.action import FollowJointTrajectory
 from rclpy.action import ActionClient
 from rclpy.node import Node
+from std_msgs.msg import String
 from trajectory_msgs.msg import JointTrajectoryPoint
-from aic_control_interfaces.msg import (
-    MotionUpdate,
-    TrajectoryGenerationMode,
-    TargetMode,
-)
-from aic_control_interfaces.srv import ChangeTargetMode
-from geometry_msgs.msg import Pose, Point, Quaternion, Wrench, Vector3
 
 
 class HomeTrajectoryNode(Node):
@@ -45,33 +42,39 @@ class HomeTrajectoryNode(Node):
         self.controller_namespace = self.declare_parameter(
             "controller_namespace", "aic_controller"
         ).value
-        self.home_joint_positions = [0.6, -1.3, -1.9, -1.57, 1.57, 0.6]
+        self.deep_insert_topic = self.declare_parameter(
+            "deep_insert_topic", "/aic/deep_insert"
+        ).value
+        self.home_joint_names = [
+            "shoulder_pan_joint",
+            "shoulder_lift_joint",
+            "elbow_joint",
+            "wrist_1_joint",
+            "wrist_2_joint",
+            "wrist_3_joint",
+        ]
+        # Match the AIC engine/sample_config initial state.
+        self.home_joint_positions = [-0.1597, -1.3542, -1.6648, -1.6933, 1.5710, 1.4110]
+        self.deep_insert_pub = self.create_publisher(String, self.deep_insert_topic, 10)
         # Create publisher if needed.
         if self.use_aic_control:
-            # Change to pose target mode, in case it was in joint target mode previously
-            change_target_mode_client = self.create_client(
+            self.switch_controller_client = self.create_client(
+                SwitchController, "/controller_manager/switch_controller"
+            )
+            self.reset_joints_client = self.create_client(
+                ResetJoints, "/scoring/reset_joints"
+            )
+            self.change_target_mode_client = self.create_client(
                 ChangeTargetMode, f"/{self.controller_namespace}/change_target_mode"
             )
-            while not change_target_mode_client.wait_for_service(timeout_sec=1.0):
-                self.get_logger().info("Waiting for change_target_mode service...")
-            target_mode_request = ChangeTargetMode.Request()
-            target_mode_request.target_mode.mode = TargetMode.MODE_CARTESIAN
-            future = change_target_mode_client.call_async(target_mode_request)
-            rclpy.spin_until_future_complete(self, future)
-            response = future.result()
-            if not response.success:
-                self.get_logger().error("Unable to set target mode")
-                rclpy.shutdown()
-                return
-            self.get_logger().info("Set target mode to CARRTESIAN")
-
-            self.publisher = self.create_publisher(
-                MotionUpdate, f"/{self.controller_namespace}/pose_commands", 10
-            )
-
-            while self.publisher.get_subscription_count() == 0:
+            while not self.switch_controller_client.wait_for_service(timeout_sec=1.0):
+                self.get_logger().info("Waiting for /controller_manager/switch_controller...")
+            while not self.reset_joints_client.wait_for_service(timeout_sec=1.0):
+                self.get_logger().info("Waiting for /scoring/reset_joints...")
+                time.sleep(1.0)
+            while not self.change_target_mode_client.wait_for_service(timeout_sec=1.0):
                 self.get_logger().info(
-                    f"Waiting for subscriber to '{self.controller_namespace}/pose_commands'..."
+                    f"Waiting for /{self.controller_namespace}/change_target_mode..."
                 )
                 time.sleep(1.0)
 
@@ -99,35 +102,65 @@ class HomeTrajectoryNode(Node):
     def get_result_callback(self, future):
         rclpy.shutdown()
 
+    def switch_controllers(self, activate, deactivate):
+        request = SwitchController.Request()
+        request.activate_controllers = list(activate)
+        request.deactivate_controllers = list(deactivate)
+        request.strictness = SwitchController.Request.BEST_EFFORT
+        future = self.switch_controller_client.call_async(request)
+        rclpy.spin_until_future_complete(self, future, timeout_sec=10.0)
+        response = future.result()
+        return response is not None and response.ok
+
+    def reset_deep_insert_trigger(self):
+        msg = String()
+        msg.data = "false"
+        self.deep_insert_pub.publish(msg)
+        self.get_logger().info(f"Published deep_insert=false to {self.deep_insert_topic}")
+
+    def set_cartesian_target_mode(self):
+        request = ChangeTargetMode.Request()
+        request.target_mode.mode = TargetMode.MODE_CARTESIAN
+        future = self.change_target_mode_client.call_async(request)
+        rclpy.spin_until_future_complete(self, future, timeout_sec=10.0)
+        response = future.result()
+        return response is not None and response.success
+
     def send_trajectory(self):
+        self.reset_deep_insert_trigger()
         if self.use_aic_control:
-            msg = MotionUpdate()
-            msg.header.stamp = self.get_clock().now().to_msg()
-            msg.header.frame_id = "base_link"
-            msg.pose = Pose(
-                position=Point(x=-0.4, y=0.2, z=0.3),
-                orientation=Quaternion(x=-0.707, y=-0.707, z=0.0, w=0.0),
-            )
-            msg.target_stiffness = np.diag(
-                [100.0, 100.0, 100.0, 50.0, 50.0, 50.0]
-            ).flatten()
-            msg.target_damping = np.diag([40.0, 40.0, 40.0, 15.0, 15.0, 15.0]).flatten()
-            msg.wrench_feedback_gains_at_tip = [0.5, 0.5, 0.5, 0.0, 0.0, 0.0]
-            msg.trajectory_generation_mode.mode = TrajectoryGenerationMode.MODE_POSITION
-            self.publisher.publish(msg)
-            self.get_logger().info(
-                "Published home joint motion update to aic_controller"
-            )
+            if not self.switch_controllers([], [self.controller_namespace]):
+                self.get_logger().error(f"Failed to deactivate {self.controller_namespace}")
+                self.timer.cancel()
+                return
+
+            request = ResetJoints.Request()
+            request.joint_names = self.home_joint_names
+            request.initial_positions = self.home_joint_positions
+            future = self.reset_joints_client.call_async(request)
+            rclpy.spin_until_future_complete(self, future, timeout_sec=10.0)
+            response = future.result()
+            if response is None or not response.success:
+                message = "no response" if response is None else response.message
+                self.get_logger().error(f"Reset joints failed: {message}")
+                self.timer.cancel()
+                return
+
+            if not self.switch_controllers([self.controller_namespace], []):
+                self.get_logger().error(f"Failed to reactivate {self.controller_namespace}")
+                self.timer.cancel()
+                return
+            if not self.set_cartesian_target_mode():
+                self.get_logger().error(
+                    f"Failed to switch {self.controller_namespace} back to Cartesian target mode"
+                )
+                self.timer.cancel()
+                return
+
+            self.get_logger().info("Reset robot to AIC initial joint state")
         else:
             goal = FollowJointTrajectory.Goal()
-            goal.trajectory.joint_names = [
-                "shoulder_pan_joint",
-                "shoulder_lift_joint",
-                "elbow_joint",
-                "wrist_1_joint",
-                "wrist_2_joint",
-                "wrist_3_joint",
-            ]
+            goal.trajectory.joint_names = self.home_joint_names
             home_point = JointTrajectoryPoint()
             home_point.positions = self.home_joint_positions
             home_point.time_from_start.sec = 1
@@ -144,9 +177,7 @@ def main(args=None):
             node = HomeTrajectoryNode()
             node.send_trajectory()
             if node.use_aic_control:
-                # Keep alive for a short duration to ensure message delivery.
-                rclpy.spin_once(node, timeout_sec=2.0)
-                rclpy.shutdown()
+                rclpy.spin_once(node, timeout_sec=0.1)
             else:
                 rclpy.spin(node)
     except (KeyboardInterrupt, ExternalShutdownException):

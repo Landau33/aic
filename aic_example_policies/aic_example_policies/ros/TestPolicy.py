@@ -78,6 +78,15 @@ class TestPolicy(Policy):
         while True: 
             time.sleep(1)
             self.get_logger().info("准备进入推理，等待中...")
+            # Only for test: home_robot may publish deep_insert=false during reset,
+            # so leave the pre-inference wait state and return to listening here.
+            if not self._deep_insert:
+                self.get_logger().info("deep_insert=false，退出准备推理阶段。")
+                self._send_zero_twist(move_robot)
+                while not self._deep_insert:
+                    send_feedback("等待 motion_planning 发布 deep_insert=true")
+                    self.sleep_for(0.5)
+                self.get_logger().info("重新收到 deep_insert=true，继续准备推理。")
 
         init_obs_msg = self._wait_for_observation(get_observation)
         if init_obs_msg is None:
