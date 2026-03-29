@@ -88,6 +88,7 @@ class HilSerlPolicy(Policy):
         start_time = time.time()
         step_index = 0
         missing_obs_count = 0
+        current_obs_msg = init_obs_msg
 
         while True:
             if not self._deep_insert:
@@ -99,6 +100,12 @@ class HilSerlPolicy(Policy):
                 self.get_logger().info("重新收到 deep_insert=true，恢复 HIL-SERL 推理。")
                 start_time = time.time()
                 missing_obs_count = 0
+                resumed_obs_msg = self._wait_for_observation(get_observation)
+                if resumed_obs_msg is None:
+                    self.get_logger().error("恢复失败：未收到 observation。")
+                    self._send_zero_twist(move_robot)
+                    return False
+                current_obs_msg = resumed_obs_msg
                 continue
 
             elapsed = time.time() - start_time
@@ -108,24 +115,30 @@ class HilSerlPolicy(Policy):
                 self._send_zero_twist(move_robot)
                 return False
 
-            obs_msg = get_observation()
-            if obs_msg is None:
-                missing_obs_count += 1
-                if missing_obs_count >= self._config.safety.max_consecutive_missing_obs:
-                    self.get_logger().error("连续丢失 observation，停止控制。")
-                    send_feedback("observation 丢失，停止控制")
-                    self._send_zero_twist(move_robot)
-                    return False
-                self.sleep_for(self._config.control.control_period_sec)
-                continue
-
-            missing_obs_count = 0
-
-            actor_obs = self._observation_adapter.adapt(obs_msg)
+            actor_obs = self._observation_adapter.adapt(current_obs_msg)
             actor_action = self._runtime.predict(actor_obs)
             command = self._action_adapter.adapt(actor_action)
             twist = self._action_adapter.to_twist(command)
             move_robot(motion_update=self._set_cartesian_twist_target(twist))
+
+            self.sleep_for(self._config.control.control_period_sec)
+
+            next_obs_msg = self._wait_for_next_observation(
+                get_observation,
+                previous_obs=current_obs_msg,
+                timeout_sec=self._config.control.control_period_sec * 2.0,
+            )
+            if next_obs_msg is None:
+                missing_obs_count += 1
+                if missing_obs_count >= self._config.safety.max_consecutive_missing_obs:
+                    self.get_logger().error("连续丢失新 observation，停止控制。")
+                    send_feedback("observation 丢失，停止控制")
+                    self._send_zero_twist(move_robot)
+                    return False
+                continue
+
+            missing_obs_count = 0
+            current_obs_msg = next_obs_msg
 
             if step_index % 10 == 0:
                 send_feedback(
@@ -133,7 +146,6 @@ class HilSerlPolicy(Policy):
                 )
 
             step_index += 1
-            self.sleep_for(self._config.control.control_period_sec)
 
     def _wait_for_observation(
         self, get_observation: GetObservationCallback, timeout_sec: float = 5.0
@@ -144,6 +156,50 @@ class HilSerlPolicy(Policy):
             if obs is not None:
                 return obs
             self.sleep_for(0.1)
+        return None
+
+    def _wait_for_next_observation(
+        self,
+        get_observation: GetObservationCallback,
+        previous_obs,
+        timeout_sec: float,
+    ):
+        previous_stamp_ns = self._observation_stamp_ns(previous_obs)
+        start_time = time.time()
+        while time.time() - start_time < timeout_sec:
+            obs = get_observation()
+            if obs is None:
+                self.sleep_for(0.01)
+                continue
+            if previous_stamp_ns is None:
+                return obs
+            current_stamp_ns = self._observation_stamp_ns(obs)
+            if current_stamp_ns is None or current_stamp_ns > previous_stamp_ns:
+                return obs
+            self.sleep_for(0.01)
+        return None
+
+    @staticmethod
+    def _observation_stamp_ns(obs) -> int | None:
+        if obs is None:
+            return None
+        candidates = [
+            getattr(getattr(obs, "center_image", None), "header", None),
+            getattr(getattr(obs, "left_image", None), "header", None),
+            getattr(getattr(obs, "right_image", None), "header", None),
+            getattr(getattr(obs, "controller_state", None), "header", None),
+        ]
+        for header in candidates:
+            if header is None:
+                continue
+            stamp = getattr(header, "stamp", None)
+            if stamp is None:
+                continue
+            sec = getattr(stamp, "sec", None)
+            nanosec = getattr(stamp, "nanosec", None)
+            if sec is None or nanosec is None:
+                continue
+            return int(sec) * 1_000_000_000 + int(nanosec)
         return None
 
     def _send_zero_twist(self, move_robot: MoveRobotCallback) -> None:
@@ -160,17 +216,17 @@ class HilSerlPolicy(Policy):
         motion_update_msg.header.stamp = self.get_clock().now().to_msg()
 
         motion_update_msg.target_stiffness = np.diag(
-            [100.0, 100.0, 100.0, 50.0, 50.0, 50.0]
+            [85.0, 85.0, 85.0, 85.0, 85.0, 85.0]
         ).flatten()
         motion_update_msg.target_damping = np.diag(
-            [40.0, 40.0, 40.0, 15.0, 15.0, 15.0]
+            [75.0, 75.0, 75.0, 75.0, 75.0, 75.0]
         ).flatten()
 
         motion_update_msg.feedforward_wrench_at_tip = Wrench(
             force=Vector3(x=0.0, y=0.0, z=0.0),
             torque=Vector3(x=0.0, y=0.0, z=0.0),
         )
-        motion_update_msg.wrench_feedback_gains_at_tip = [0.5, 0.5, 0.5, 0.0, 0.0, 0.0]
+        motion_update_msg.wrench_feedback_gains_at_tip = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
         motion_update_msg.trajectory_generation_mode.mode = (
             TrajectoryGenerationMode.MODE_VELOCITY
         )

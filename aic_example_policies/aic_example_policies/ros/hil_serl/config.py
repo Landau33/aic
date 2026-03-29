@@ -17,7 +17,32 @@
 """AIC 中运行 HIL-SERL actor 推理所需的配置。"""
 
 from dataclasses import dataclass, field
+import importlib.util
 from pathlib import Path
+
+
+def _load_actor_task_config_module():
+    module_path = Path(
+        "/home/young/ws_aic/hil-serl/examples/experiments/aic_cable_insertion/config.py"
+    )
+    spec = importlib.util.spec_from_file_location(
+        "hil_serl_actor_task_config",
+        module_path,
+    )
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
+try:
+    _ACTOR_TASK_CONFIG_MODULE = _load_actor_task_config_module()
+    _ACTOR_ENV_CONFIG = _ACTOR_TASK_CONFIG_MODULE.EnvConfig()
+    _ACTOR_TRAIN_CONFIG = _ACTOR_TASK_CONFIG_MODULE.TrainConfig()
+except Exception:
+    _ACTOR_TASK_CONFIG_MODULE = None
+    _ACTOR_ENV_CONFIG = None
+    _ACTOR_TRAIN_CONFIG = None
 
 
 @dataclass(frozen=True)
@@ -32,34 +57,54 @@ class HilSerlModelConfig:
     """HIL-SERL actor 模型相关配置。"""
 
     exp_name: str = "aic_cable_insertion"
-    setup_mode: str = "single-arm-fixed-gripper"
+    setup_mode: str = (
+        _ACTOR_TRAIN_CONFIG.setup_mode
+        if _ACTOR_TRAIN_CONFIG is not None
+        else "single-arm-fixed-gripper"
+    )
     checkpoint_path: str = "/home/young/ws_aic/hil-serl/examples/experiments/aic_cable_insertion/checkpoints_test"
-    checkpoint_step: int = 20000
+    checkpoint_step: int = 100000 
     seed: int = 42
     argmax: bool = False
-    encoder_type: str = "resnet-pretrained"
+    encoder_type: str = (
+        _ACTOR_TRAIN_CONFIG.encoder_type
+        if _ACTOR_TRAIN_CONFIG is not None
+        else "resnet-pretrained"
+    )
     action_dim: int = 6
-    image_keys: tuple[str, ...] = ("left_camera", "center_camera", "right_camera")
+    image_keys: tuple[str, ...] = (
+        tuple(_ACTOR_TRAIN_CONFIG.image_keys)
+        if _ACTOR_TRAIN_CONFIG is not None
+        else ("left_camera", "center_camera", "right_camera")
+    )
 
 
 @dataclass(frozen=True)
 class HilSerlObservationConfig:
     """把 AIC Observation 对齐到 HIL-SERL 输入时需要的配置。"""
 
-    image_width: int = 128
-    image_height: int = 128
-    image_keys: tuple[str, ...] = ("left_camera", "center_camera", "right_camera")
+    image_width: int = _ACTOR_ENV_CONFIG.image_width if _ACTOR_ENV_CONFIG is not None else 128
+    image_height: int = _ACTOR_ENV_CONFIG.image_height if _ACTOR_ENV_CONFIG is not None else 128
+    image_keys: tuple[str, ...] = (
+        _ACTOR_ENV_CONFIG.image_keys
+        if _ACTOR_ENV_CONFIG is not None
+        else ("left_camera", "center_camera", "right_camera")
+    )
     aic_image_topics: tuple[str, ...] = ("left", "center", "right")
     observation_horizon: int = 1
     proprio_keys: tuple[str, ...] = (
-        "tcp_pose",
-        "tcp_vel",
-        "tcp_error",
-        "joint_positions",
-        "joint_velocities",
-        "joint_efforts",
-        "wrist_force",
-        "wrist_torque",
+        _ACTOR_ENV_CONFIG.proprio_keys
+        if _ACTOR_ENV_CONFIG is not None
+        else (
+            "tcp_pose",
+            "tcp_vel",
+            "tcp_error",
+            "joint_positions",
+            "joint_velocities",
+            "joint_efforts",
+            "wrist_force",
+            "wrist_torque",
+        )
     )
 
 
@@ -67,9 +112,26 @@ class HilSerlObservationConfig:
 class HilSerlControlConfig:
     """把 actor 输出映射成 AIC 速度控制命令时使用的参数。"""
 
-    control_period_sec: float = 0.10
-    action_scale_linear: float = 0.01
-    action_scale_angular: float = 0.06
+    control_period_sec: float = (
+        _ACTOR_ENV_CONFIG.policy_control_period_sec
+        if _ACTOR_ENV_CONFIG is not None
+        else 0.10
+    )
+    action_scale_linear: float = (
+        _ACTOR_ENV_CONFIG.action_scale_linear
+        if _ACTOR_ENV_CONFIG is not None
+        else 0.01
+    )
+    action_scale_angular: float = (
+        _ACTOR_ENV_CONFIG.action_scale_angular
+        if _ACTOR_ENV_CONFIG is not None
+        else 0.06
+    )
+    control_frame_id: str = (
+        _ACTOR_ENV_CONFIG.control_frame_id
+        if _ACTOR_ENV_CONFIG is not None
+        else "base_link"
+    )
     max_linear_speed: float = 0.02
     max_angular_speed: float = 0.20
     linear_deadband: float = 1e-4
@@ -81,9 +143,9 @@ class HilSerlSafetyConfig:
     """deep-insert 阶段的保守安全参数。"""
 
     max_runtime_sec: float = 600.0
-    max_abs_force_z: float = 20.0
-    max_abs_force_xy: float = 20.0
-    max_abs_torque_xyz: float = 4.0
+    max_abs_force_z: float = 200.0
+    max_abs_force_xy: float = 200.0
+    max_abs_torque_xyz: float = 40.0
     max_consecutive_missing_obs: int = 10
 
 

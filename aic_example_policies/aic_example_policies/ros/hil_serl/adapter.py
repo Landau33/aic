@@ -187,22 +187,10 @@ class HilSerlActionAdapter:
         if values.shape[0] < 6:
             raise ValueError(f"HIL-SERL action dim too small: {values.shape[0]}")
 
+        # Match the training environment's action pipeline: only scale the
+        # normalized policy output before sending velocity commands.
         linear = values[:3] * self._config.action_scale_linear
         angular = values[3:6] * self._config.action_scale_angular
-
-        linear = np.clip(
-            linear,
-            -self._config.max_linear_speed,
-            self._config.max_linear_speed,
-        )
-        angular = np.clip(
-            angular,
-            -self._config.max_angular_speed,
-            self._config.max_angular_speed,
-        )
-
-        linear[np.abs(linear) < self._config.linear_deadband] = 0.0
-        angular[np.abs(angular) < self._config.angular_deadband] = 0.0
 
         return CartesianVelocityCommand(linear_xyz=linear, angular_xyz=angular)
 
