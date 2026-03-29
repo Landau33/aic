@@ -81,7 +81,7 @@ class AICCartesianTrajectoryNode(Node):
         # ======================== Deep Insert handoff参数 ========================
         self.declare_parameter("handoff_to_test_policy", True) 
         self.declare_parameter("deep_insert_topic", "/aic/deep_insert") 
-        self.declare_parameter("handoff_lift_distance", 0.003) # 孔洞找到后提升的距离（m）
+        self.declare_parameter("handoff_lift_distance", 0.002) # 孔洞找到后提升的距离（m）
         self.declare_parameter("handoff_hold_duration", 1.0) # 孔洞找到后保持的时间（s）
 
         self.duration_sec = self.get_parameter("duration_sec").value

@@ -166,6 +166,8 @@ class HilSerlObservationAdapter:
         img = np.frombuffer(image_msg.data, dtype=np.uint8).reshape(
             image_msg.height, image_msg.width, 3
         )
+        if image_msg.encoding.lower() == "rgb8":
+            img = img[..., ::-1]
         img = cv2.resize(
             img,
             (self._config.image_width, self._config.image_height),

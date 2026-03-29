@@ -31,10 +31,10 @@ class HilSerlTopicConfig:
 class HilSerlModelConfig:
     """HIL-SERL actor 模型相关配置。"""
 
-    exp_name: str = "ram_insertion"
+    exp_name: str = "aic_cable_insertion"
     setup_mode: str = "single-arm-fixed-gripper"
-    checkpoint_path: str = "/home/young/ws_aic/hil-serl/examples/experiments/ram_insertion/first_run"
-    checkpoint_step: int = 0
+    checkpoint_path: str = "/home/young/ws_aic/hil-serl/examples/experiments/aic_cable_insertion/checkpoints_test"
+    checkpoint_step: int = 20000
     seed: int = 42
     argmax: bool = False
     encoder_type: str = "resnet-pretrained"
@@ -80,7 +80,7 @@ class HilSerlControlConfig:
 class HilSerlSafetyConfig:
     """deep-insert 阶段的保守安全参数。"""
 
-    max_runtime_sec: float = 30.0
+    max_runtime_sec: float = 600.0
     max_abs_force_z: float = 20.0
     max_abs_force_xy: float = 20.0
     max_abs_torque_xyz: float = 4.0
