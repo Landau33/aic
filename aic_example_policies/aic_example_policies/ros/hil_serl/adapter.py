@@ -44,10 +44,7 @@ class HilSerlObservationAdapter:
     - wrist_torque: 3 维
 
     合计 46 维。
-    图像输入使用 AIC Observation 里的三路相机：
-    - left_image  -> left_camera
-    - center_image -> center_camera
-    - right_image -> right_camera
+    图像输入使用配置指定的 AIC 相机，并按 `image_keys` 对齐 actor 输入。
     """
 
     def __init__(self, config: HilSerlObservationConfig):

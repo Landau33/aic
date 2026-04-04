@@ -45,6 +45,15 @@ except Exception:
     _ACTOR_TRAIN_CONFIG = None
 
 
+def _default_aic_image_topics(image_keys: tuple[str, ...]) -> tuple[str, ...]:
+    key_to_topic = {
+        "left_camera": "left",
+        "center_camera": "center",
+        "right_camera": "right",
+    }
+    return tuple(key_to_topic[key] for key in image_keys)
+
+
 @dataclass(frozen=True)
 class HilSerlTopicConfig:
     """与阶段切换和可选外部控制相关的 topic 配置。"""
@@ -75,7 +84,7 @@ class HilSerlModelConfig:
     image_keys: tuple[str, ...] = (
         tuple(_ACTOR_TRAIN_CONFIG.image_keys)
         if _ACTOR_TRAIN_CONFIG is not None
-        else ("left_camera", "center_camera", "right_camera")
+        else ()
     )
 
 
@@ -86,11 +95,11 @@ class HilSerlObservationConfig:
     image_width: int = _ACTOR_ENV_CONFIG.image_width if _ACTOR_ENV_CONFIG is not None else 128
     image_height: int = _ACTOR_ENV_CONFIG.image_height if _ACTOR_ENV_CONFIG is not None else 128
     image_keys: tuple[str, ...] = (
-        _ACTOR_ENV_CONFIG.image_keys
-        if _ACTOR_ENV_CONFIG is not None
-        else ("left_camera", "center_camera", "right_camera")
+        tuple(_ACTOR_TRAIN_CONFIG.image_keys)
+        if _ACTOR_TRAIN_CONFIG is not None
+        else ()
     )
-    aic_image_topics: tuple[str, ...] = ("left", "center", "right")
+    aic_image_topics: tuple[str, ...] = _default_aic_image_topics(image_keys)
     observation_horizon: int = 1
     proprio_keys: tuple[str, ...] = (
         _ACTOR_ENV_CONFIG.proprio_keys
