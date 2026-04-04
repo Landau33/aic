@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # 用法:
-#   ros2 run my_policy_node wrench_tf_processor_node
-#   ros2 run my_policy_node wrench_tf_processor_node --ros-args -p target_frame:=cable_0/sfp_tip_link -p enable_visualization:=true
+#   python3 wrench_tf_processor_node.py
+#   python3 wrench_tf_processor_node.py --ros-args -p target_frame:=gripper/tcp -p source_frame:=ati/tool_link -p use_sim_time:=true
 # 功能:
 #   1) 订阅原始力/力矩与 tare，进行去皮 + TF 转换，发布:
 #      - /nic_insertion/processed_wrench
@@ -10,6 +10,7 @@
 
 from collections import deque
 import copy
+import sys
 
 import numpy as np
 import rclpy
@@ -18,14 +19,10 @@ from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.parameter import Parameter
 
-import tf2_ros
-from tf2_geometry_msgs import do_transform_vector3
 from tf2_ros import Buffer, TransformListener
 
-from geometry_msgs.msg import Vector3Stamped, WrenchStamped
+from geometry_msgs.msg import WrenchStamped
 from aic_control_interfaces.msg import ControllerState
-
-from my_policy_node.nic_motion_core import NICInsertionControllerCore
 
 
 def quaternion_to_rotation_matrix(q) -> np.ndarray:
@@ -42,7 +39,7 @@ class WrenchTFProcessorNode(Node):
     def __init__(self):
         super().__init__("wrench_tf_processor_node")
 
-        self.declare_parameter("target_frame", "cable_0/sfp_tip_link")
+        self.declare_parameter("target_frame", "gripper/tcp")
         self.declare_parameter("source_frame", "ati/tool_link")
         self.declare_parameter("raw_wrench_topic", "/fts_broadcaster/wrench")
         self.declare_parameter("controller_state_topic", "/aic_controller/controller_state")
@@ -57,8 +54,6 @@ class WrenchTFProcessorNode(Node):
         self.output_topic = str(self.get_parameter("output_topic").value)
         self.output_filtered_topic = str(self.get_parameter("output_filtered_topic").value)
         self.filter_window_sec = float(self.get_parameter("filter_window_sec").value)
-
-        self.core = NICInsertionControllerCore()
 
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
@@ -91,6 +86,7 @@ class WrenchTFProcessorNode(Node):
         self.get_logger().info(f"source_frame: {self.source_frame}")
         self.get_logger().info(f"publishing: {self.output_topic}")
         self.get_logger().info(f"publishing: {self.output_filtered_topic}")
+        self.get_logger().info("wrench flow: raw -> tare -> tf(target_frame) -> filtered")
 
     def wrench_callback(self, msg: WrenchStamped):
         self.current_wrench = msg
@@ -139,14 +135,6 @@ class WrenchTFProcessorNode(Node):
             return
 
         try:
-            force_stamped = Vector3Stamped()
-            force_stamped.header = self.current_tared_wrench.header
-            force_stamped.vector = self.current_tared_wrench.wrench.force
-
-            torque_stamped = Vector3Stamped()
-            torque_stamped.header = self.current_tared_wrench.header
-            torque_stamped.vector = self.current_tared_wrench.wrench.torque
-
             transform = self.tf_buffer.lookup_transform(
                 self.target_frame,
                 self.source_frame,
@@ -179,42 +167,25 @@ class WrenchTFProcessorNode(Node):
             tau_target = R @ tau_source + np.cross(p, f_target)   # ← 这就是缺失的 p×F
 
             raw_wrench = np.concatenate([f_target, tau_target])
-            # transformed_force = do_transform_vector3(force_stamped, transform)
-            # transformed_torque = do_transform_vector3(torque_stamped, transform)
-
-            # raw_wrench = np.array(
-            #     [
-            #         transformed_force.vector.x,
-            #         transformed_force.vector.y,
-            #         transformed_force.vector.z,
-            #         transformed_torque.vector.x,
-            #         transformed_torque.vector.y,
-            #         transformed_torque.vector.z,
-            #     ],
-            #     dtype=np.float64,
-            # )
         except Exception as exc:
             self.get_logger().warn(f"Wrench transform failed: {str(exc)}")
             return
 
-        processed_wrench = self.core.process_force(raw_wrench)
         now_sec = self.get_clock().now().nanoseconds / 1e9
-        filtered_wrench = self._update_filter(processed_wrench, now_sec)
+        filtered_wrench = self._update_filter(raw_wrench, now_sec)
 
-        self._publish_wrench(processed_wrench, self.target_frame, self.processed_pub)
+        self._publish_wrench(raw_wrench, self.target_frame, self.processed_pub)
         self._publish_wrench(filtered_wrench, self.target_frame, self.filtered_pub)
 
 
 def main(args=None):
+    cli_args = list(sys.argv[1:] if args is None else args)
     rclpy.init(args=args)
     node = WrenchTFProcessorNode()
-    node.set_parameters([
-		Parameter(
-			'use_sim_time',
-			Parameter.Type.BOOL,
-			True
-		)
-	])
+    if not any("use_sim_time:=" in arg for arg in cli_args):
+        node.set_parameters([
+            Parameter("use_sim_time", Parameter.Type.BOOL, True)
+        ])
 
     try:
         rclpy.spin(node)

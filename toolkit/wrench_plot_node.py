@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 
 from collections import deque
+import sys
 
 import matplotlib.pyplot as plt
 import rclpy
 from geometry_msgs.msg import WrenchStamped
 from rclpy.node import Node
+from rclpy.parameter import Parameter
 
 
 class WrenchPlotNode(Node):
@@ -180,8 +182,13 @@ class WrenchPlotNode(Node):
 
 
 def main(args=None):
+    cli_args = list(sys.argv[1:] if args is None else args)
     rclpy.init(args=args)
     node = WrenchPlotNode()
+    if not any("use_sim_time:=" in arg for arg in cli_args):
+        node.set_parameters([
+            Parameter("use_sim_time", Parameter.Type.BOOL, True)
+        ])
 
     try:
         plt.ion()

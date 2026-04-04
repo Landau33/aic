@@ -1,14 +1,21 @@
+import os
+import sys
+
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
+from launch.actions import ExecuteProcess
 from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration
-from launch_ros.actions import Node
 
 
 def generate_launch_description():
+    toolkit_dir = os.path.dirname(os.path.abspath(__file__))
+    processor_script = os.path.join(toolkit_dir, "wrench_tf_processor_node.py")
+    plot_script = os.path.join(toolkit_dir, "wrench_plot_node.py")
+
     target_frame_arg = DeclareLaunchArgument(
         "target_frame",
-        default_value="cable_0/sfp_tip_link",
+        default_value="gripper/tcp",
         description="Target frame for wrench transformation",
     )
     source_frame_arg = DeclareLaunchArgument(
@@ -32,28 +39,34 @@ def generate_launch_description():
         description="Whether to start wrench_plot_node",
     )
 
-    wrench_tf_processor = Node(
-        package="my_policy_node",
-        executable="wrench_tf_processor_node",
+    wrench_tf_processor = ExecuteProcess(
+        cmd=[
+            sys.executable,
+            processor_script,
+            "--ros-args",
+            "-p",
+            ["target_frame:=", LaunchConfiguration("target_frame")],
+            "-p",
+            ["source_frame:=", LaunchConfiguration("source_frame")],
+            "-p",
+            ["use_sim_time:=", LaunchConfiguration("use_sim_time")],
+        ],
         name="wrench_tf_processor_node",
         output="screen",
         condition=IfCondition(LaunchConfiguration("enable_processor")),
-        parameters=[
-            {
-                "target_frame": LaunchConfiguration("target_frame"),
-                "source_frame": LaunchConfiguration("source_frame"),
-                "use_sim_time": LaunchConfiguration("use_sim_time"),
-            }
-        ],
     )
 
-    wrench_plot = Node(
-        package="my_policy_node",
-        executable="wrench_plot_node",
+    wrench_plot = ExecuteProcess(
+        cmd=[
+            sys.executable,
+            plot_script,
+            "--ros-args",
+            "-p",
+            ["use_sim_time:=", LaunchConfiguration("use_sim_time")],
+        ],
         name="wrench_plot_node",
         output="screen",
         condition=IfCondition(LaunchConfiguration("enable_plot")),
-        parameters=[{"use_sim_time": LaunchConfiguration("use_sim_time")}],
     )
 
     return LaunchDescription(
