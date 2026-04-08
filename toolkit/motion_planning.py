@@ -18,16 +18,16 @@
 
 """
 This script generates an interpolated Cartesian trajectory from the current gripper/tcp pose
-to the proximity_target frame, and publishes position commands at 25 Hz using MotionUpdate
+to an internally computed target pose derived from nic_port_rec, and publishes position commands at 25 Hz using MotionUpdate
 in MODE_POSITION.
 
 新增标志位：
 - use_static_target (默认 True)：
-  True  → 只在开始时获取一次 proximity_target 位姿，全程插值到这个固定目标
-  False → 每周期重新获取 proximity_target 的最新位姿（动态跟踪）
+  True  → 只在开始时获取一次目标位姿，全程插值到这个固定目标
+  False → 每周期重新获取最新估计目标位姿（动态跟踪）
 
 修改：
-- 到达 proximity_target 后，暂停 1s
+- 到达目标位姿后，暂停 1s
 - 然后切换到速度模式（MODE_VELOCITY），保持 XY 不变，Z 负方向移动（向下压）
 - 监测 Z 力，如果 |force.z| > 15N，停止速度发布（Twist 全 0）
 
@@ -42,6 +42,7 @@ Usage:
 
 import copy
 import math
+import time
 
 import rclpy
 from rclpy.node import Node
@@ -59,11 +60,19 @@ from aic_control_interfaces.msg import (
     ControllerState
 )
 from std_msgs.msg import String
+from rclpy.parameter import Parameter
 
 
 class AICCartesianTrajectoryNode(Node):
     def __init__(self):
         super().__init__("aic_trajectory_to_proximity")
+        self.set_parameters([
+            Parameter(
+                'use_sim_time',
+                Parameter.Type.BOOL,
+                True,
+            )
+        ])
 
         # ======================== 参数 ========================
         self.declare_parameter("duration_sec", 8.0)          # 总插值时间（秒）
@@ -71,6 +80,8 @@ class AICCartesianTrajectoryNode(Node):
         self.declare_parameter("frame_id", "base_link")    # 参考帧：gripper/tcp 或 base_link
         self.declare_parameter("controller_namespace", "aic_controller")
         self.declare_parameter("use_static_target", True)    # 是否使用静态目标位姿
+        self.declare_parameter("tcp_frame", "gripper/tcp")
+        self.declare_parameter("nic_port_frame", "nic_port_rec")
         self.declare_parameter("z_velocity", -0.02)          # Z 负方向速度（m/s）
         self.declare_parameter("force_threshold", 10.0)      # Z 力阈值（N）
         # ======================== 螺旋搜索参数 ========================
@@ -89,6 +100,8 @@ class AICCartesianTrajectoryNode(Node):
         self.frame_id = self.get_parameter("frame_id").value
         self.controller_ns = self.get_parameter("controller_namespace").value
         self.use_static_target = self.get_parameter("use_static_target").value
+        self.tcp_frame = self.get_parameter("tcp_frame").value
+        self.nic_port_frame = self.get_parameter("nic_port_frame").value
         self.z_velocity = self.get_parameter("z_velocity").value
         self.force_threshold = self.get_parameter("force_threshold").value
         self.spiral_radial_speed = self.get_parameter("spiral_radial_speed").value
@@ -105,6 +118,8 @@ class AICCartesianTrajectoryNode(Node):
         self.get_logger().info(f"Target frame mode: {self.frame_id}")
         self.get_logger().info(f"Use static target: {self.use_static_target} "
                               f"(True=固定初始目标, False=动态跟踪)")
+        self.get_logger().info(f"TCP frame: {self.tcp_frame}")
+        self.get_logger().info(f"NIC port frame: {self.nic_port_frame}")
         self.get_logger().info(f"Z velocity: {self.z_velocity} m/s")
         self.get_logger().info(f"Force threshold: {self.force_threshold} N")
         self.get_logger().info(f"Handoff to TestPolicy after hole found: {self.handoff_to_test_policy}")
@@ -149,10 +164,12 @@ class AICCartesianTrajectoryNode(Node):
         # ======================== TF2 ========================
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
+        self._target_quaternion = self._build_target_quaternion()
+        self._last_target_warn_time = 0.0
 
         # ======================== 轨迹状态 ========================
         self.start_pose = None          # 开始时的 TCP pose
-        self.target_pose = None         # proximity_target 的位姿（静态或动态）
+        self.target_pose = None         # 估计目标位姿（静态或动态）
         self.start_time = None          # 开始插值的时间戳
         self.trajectory_active = False  # 是否正在执行位置轨迹
         self.velocity_active = False    # 是否正在执行速度模式
@@ -191,11 +208,25 @@ class AICCartesianTrajectoryNode(Node):
 
         # self.get_logger().info(f"Tared force z: {self.current_tared_wrench.wrench.force.z} N")
 
+    def _build_target_quaternion(self):
+        r_current = np.array([
+            [-0.998, 0.001, -0.056],
+            [-0.052, 0.353, 0.934],
+            [0.021, 0.935, -0.353],
+        ], dtype=np.float64)
+        r_target = np.array([
+            [-1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [0.0, 1.0, 0.0],
+        ], dtype=np.float64)
+        r_relative = np.linalg.inv(r_current) @ r_target
+        return R.from_matrix(r_relative).as_quat()
+
     def get_current_tcp_pose(self):
-        """获取当前 gripper/tcp 的位姿（相对于 base_link）"""
+        """获取当前 tcp_frame 的位姿（相对于 base_link）"""
         try:
             trans = self.tf_buffer.lookup_transform(
-                "base_link", "gripper/tcp", rclpy.time.Time(), timeout=Duration(seconds=1.0)
+                "base_link", self.tcp_frame, rclpy.time.Time(), timeout=Duration(seconds=1.0)
             )
             p = trans.transform.translation
             q = trans.transform.rotation
@@ -206,25 +237,63 @@ class AICCartesianTrajectoryNode(Node):
             pose.orientation = q
             return pose
         except Exception as e:
-            self.get_logger().warn(f"Failed to get current tcp pose: {str(e)}")
+            self.get_logger().warning(f"Failed to get current tcp pose: {str(e)}")
             return None
 
     def get_target_pose(self):
-        """获取 proximity_target 的位姿（相对于 base_link）"""
+        """根据 nic_port_rec 估计目标位姿（相对于 base_link）。"""
         try:
-            trans = self.tf_buffer.lookup_transform(
-                "base_link", "proximity_target", rclpy.time.Time(), timeout=Duration(seconds=0.5)
+            tcp_tf = self.tf_buffer.lookup_transform(
+                "base_link", self.tcp_frame, rclpy.time.Time(), timeout=Duration(seconds=0.5)
             )
-            p = trans.transform.translation
-            q = trans.transform.rotation
+            port_in_tcp_tf = self.tf_buffer.lookup_transform(
+                self.tcp_frame, self.nic_port_frame, rclpy.time.Time(), timeout=Duration(seconds=0.5)
+            )
+
+            tcp_translation = np.array(
+                [
+                    tcp_tf.transform.translation.x,
+                    tcp_tf.transform.translation.y,
+                    tcp_tf.transform.translation.z,
+                ],
+                dtype=np.float64,
+            )
+            tcp_rotation = R.from_quat(
+                [
+                    tcp_tf.transform.rotation.x,
+                    tcp_tf.transform.rotation.y,
+                    tcp_tf.transform.rotation.z,
+                    tcp_tf.transform.rotation.w,
+                ]
+            )
+            target_in_tcp_translation = np.array(
+                [
+                    port_in_tcp_tf.transform.translation.x,
+                    port_in_tcp_tf.transform.translation.y,
+                    port_in_tcp_tf.transform.translation.z,
+                ],
+                dtype=np.float64,
+            )
+            target_translation = tcp_translation + tcp_rotation.apply(target_in_tcp_translation)
+            target_rotation = tcp_rotation * R.from_quat(self._target_quaternion)
+            target_quat = target_rotation.as_quat()
+
             pose = Pose()
-            pose.position.x = p.x
-            pose.position.y = p.y
-            pose.position.z = p.z
-            pose.orientation = q
+            pose.position.x = float(target_translation[0])
+            pose.position.y = float(target_translation[1])
+            pose.position.z = float(target_translation[2])
+            pose.orientation.x = float(target_quat[0])
+            pose.orientation.y = float(target_quat[1])
+            pose.orientation.z = float(target_quat[2])
+            pose.orientation.w = float(target_quat[3])
             return pose
         except Exception as e:
-            self.get_logger().warn(f"Failed to get proximity_target pose: {str(e)}")
+            now = time.monotonic()
+            if now - self._last_target_warn_time >= 1.0:
+                self.get_logger().warning(
+                    f"Failed to estimate target pose from {self.nic_port_frame}: {str(e)}"
+                )
+                self._last_target_warn_time = now
             return None
 
     def start_trajectory(self):
@@ -233,7 +302,7 @@ class AICCartesianTrajectoryNode(Node):
         self.target_pose = self.get_target_pose()
 
         if self.start_pose is None or self.target_pose is None:
-            self.get_logger().warn("Cannot start trajectory: missing poses")
+            self.get_logger().warning("Cannot start trajectory: missing poses")
             return False
 
         self.start_time = self.get_clock().now()

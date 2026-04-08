@@ -16,6 +16,13 @@ from ultralytics import YOLO
 class NICPortEstimator(Node):
     def __init__(self):
         super().__init__('nic_port_estimator')
+        self.set_parameters([
+            Parameter(
+                'use_sim_time',
+                Parameter.Type.BOOL,
+                True
+            )
+        ])
 
         # 内参
         fx = 1236.63171387
@@ -250,13 +257,6 @@ class NICPortEstimator(Node):
 def main(args=None):
     rclpy.init(args=args)
     node = NICPortEstimator()
-    node.set_parameters([
-        Parameter(
-            'use_sim_time',
-            Parameter.Type.BOOL,
-            True
-        )
-    ])
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:
