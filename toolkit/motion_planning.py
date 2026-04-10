@@ -137,11 +137,8 @@ class AICCartesianTrajectoryNode(Node):
             self.deep_insert_topic,
             10,
         )
-
-        # 等待有订阅者
-        while self.motion_pub.get_subscription_count() == 0:
-            self.get_logger().info("Waiting for subscriber to pose_commands...")
-            self.get_clock().sleep_for(Duration(seconds=1.0))
+        self.waiting_for_motion_subscriber = True
+        self._last_motion_subscriber_log_time = 0.0
 
         # ======================== 力传感器订阅 ========================
         self.init_wrench = None
@@ -472,6 +469,17 @@ class AICCartesianTrajectoryNode(Node):
         return True
 
     def timer_callback(self):
+        if self.waiting_for_motion_subscriber:
+            if self.motion_pub.get_subscription_count() == 0:
+                now = time.monotonic()
+                if now - self._last_motion_subscriber_log_time >= 1.0:
+                    self.get_logger().info("Waiting for subscriber to pose_commands...")
+                    self._last_motion_subscriber_log_time = now
+                return
+
+            self.waiting_for_motion_subscriber = False
+            self.get_logger().info("pose_commands subscriber detected. Starting motion logic.")
+
         # 如果还没开始轨迹，尝试启动
         if not self.trajectory_active and not self.velocity_active and not hasattr(self, 'trajectory_started'):
             if self.start_trajectory():
@@ -659,14 +667,16 @@ class AICCartesianTrajectoryNode(Node):
 
 def main(args=None):
     rclpy.init(args=args)
-    node = AICCartesianTrajectoryNode()
+    node = None
 
     try:
+        node = AICCartesianTrajectoryNode()
         rclpy.spin(node)
     except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
-        node.destroy_node()
+        if node is not None:
+            node.destroy_node()
         rclpy.shutdown()
 
 

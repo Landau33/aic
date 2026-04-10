@@ -63,6 +63,8 @@ def generate_launch_description():
             "--ros-args",
             "-p",
             ["use_sim_time:=", LaunchConfiguration("use_sim_time")],
+            "-p",
+            ["target_frame:=", LaunchConfiguration("target_frame")],
         ],
         name="wrench_plot_node",
         output="screen",

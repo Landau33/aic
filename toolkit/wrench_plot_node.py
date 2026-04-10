@@ -14,9 +14,15 @@ class WrenchPlotNode(Node):
     def __init__(self):
         super().__init__("wrench_plot_node")
 
-        self.topic_name = "/nic_insertion/processed_wrench"
-        self.filtered_topic_name = "/nic_insertion/processed_wrench/filtered"
-        self.window_sec = 20.0
+        self.declare_parameter("topic_name", "/nic_insertion/processed_wrench")
+        self.declare_parameter("filtered_topic_name", "/nic_insertion/processed_wrench/filtered")
+        self.declare_parameter("window_sec", 20.0)
+        self.declare_parameter("target_frame", "gripper/tcp")
+
+        self.topic_name = str(self.get_parameter("topic_name").value)
+        self.filtered_topic_name = str(self.get_parameter("filtered_topic_name").value)
+        self.window_sec = float(self.get_parameter("window_sec").value)
+        self.target_frame = str(self.get_parameter("target_frame").value)
 
         self.times = deque()
         self.times_filtered = deque()
@@ -73,22 +79,26 @@ class WrenchPlotNode(Node):
         self.line_ty_filtered, = self.ax_torque_filtered.plot([], [], label="Ty (filtered)")
         self.line_tz_filtered, = self.ax_torque_filtered.plot([], [], label="Tz (filtered)")
 
-        self.ax_force.set_title("Processed Wrench - Force")
+        self.ax_force.set_title(f"Processed Wrench In {self.target_frame} - Force")
         self.ax_force.set_ylabel("Force (N)")
         self.ax_force.legend(loc="upper right")
         self.ax_force.grid(True)
 
-        self.ax_force_filtered.set_title("Processed Wrench - Force (1s Filtered)")
+        self.ax_force_filtered.set_title(
+            f"Processed Wrench In {self.target_frame} - Force (1s Filtered)"
+        )
         self.ax_force_filtered.set_ylabel("Force (N)")
         self.ax_force_filtered.legend(loc="upper right")
         self.ax_force_filtered.grid(True)
 
-        self.ax_torque.set_title("Processed Wrench - Torque")
+        self.ax_torque.set_title(f"Processed Wrench In {self.target_frame} - Torque")
         self.ax_torque.set_ylabel("Torque (Nm)")
         self.ax_torque.legend(loc="upper right")
         self.ax_torque.grid(True)
 
-        self.ax_torque_filtered.set_title("Processed Wrench - Torque (1s Filtered)")
+        self.ax_torque_filtered.set_title(
+            f"Processed Wrench In {self.target_frame} - Torque (1s Filtered)"
+        )
         self.ax_torque_filtered.set_xlabel("Time (s)")
         self.ax_torque_filtered.set_ylabel("Torque (Nm)")
         self.ax_torque_filtered.legend(loc="upper right")
@@ -96,6 +106,7 @@ class WrenchPlotNode(Node):
 
         self.get_logger().info(f"Subscribed to {self.topic_name}")
         self.get_logger().info(f"Subscribed to {self.filtered_topic_name}")
+        self.get_logger().info(f"Visualizing wrench in frame {self.target_frame}")
 
     def wrench_callback(self, msg: WrenchStamped):
         now = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
