@@ -168,11 +168,7 @@ class HilSerlObservationAdapter:
         )
         if image_msg.encoding.lower() == "rgb8":
             img = img[..., ::-1]
-        img = cv2.resize(
-            img,
-            (self._config.image_width, self._config.image_height),
-            interpolation=cv2.INTER_AREA,
-        )
+        # No resize needed, image is already cropped to desired size
         return img
 
 

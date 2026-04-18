@@ -17,16 +17,7 @@
 import time
 
 import numpy as np
-from aic_control_interfaces.msg import MotionUpdate, TrajectoryGenerationMode
-from aic_model.policy import (
-    GetObservationCallback,
-    MoveRobotCallback,
-    Policy,
-    SendFeedbackCallback,
-)
-from aic_task_interfaces.msg import Task
-from geometry_msgs.msg import Twist, Vector3, Wrench
-from std_msgs.msg import String
+from aic_model_interfaces.msg import Observation
 
 from .hil_serl.adapter import HilSerlActionAdapter, HilSerlObservationAdapter
 from .hil_serl.config import HilSerlRuntimeConfig
@@ -50,11 +41,21 @@ class HilSerlPolicy(Policy):
             self._on_deepinsert_event,
             10,
         )
+        self._observation_roi_msg = None
+        self._observation_roi_sub = parent_node.create_subscription(
+            Observation,
+            "observations_roi",
+            self._observation_roi_callback,
+            10,
+        )
         self.get_logger().info("HilSerlPolicy.__init__()")
 
     def _on_deepinsert_event(self, msg: String) -> None:
         self._deep_insert = msg.data.strip().lower() == "true"
         self.get_logger().info(f"deep_insert={self._deep_insert}")
+
+    def _observation_roi_callback(self, msg: Observation) -> None:
+        self._observation_roi_msg = msg
 
     def insert_cable(
         self,
@@ -75,9 +76,9 @@ class HilSerlPolicy(Policy):
         self.get_logger().info("进入 deep-insert 阶段，开始 HIL-SERL actor 推理。")
         send_feedback("deep_insert 已接管，初始化 HIL-SERL actor")
 
-        init_obs_msg = self._wait_for_observation(get_observation)
+        init_obs_msg = self._wait_for_roi_observation()
         if init_obs_msg is None:
-            self.get_logger().error("初始化失败：未收到 observation。")
+            self.get_logger().error("初始化失败：未收到 observation_roi。")
             self._send_zero_twist(move_robot)
             return False
 
@@ -123,8 +124,7 @@ class HilSerlPolicy(Policy):
 
             self.sleep_for(self._config.control.control_period_sec)
 
-            next_obs_msg = self._wait_for_next_observation(
-                get_observation,
+            next_obs_msg = self._wait_for_next_roi_observation(
                 previous_obs=current_obs_msg,
                 timeout_sec=self._config.control.control_period_sec * 2.0,
             )
@@ -231,3 +231,29 @@ class HilSerlPolicy(Policy):
             TrajectoryGenerationMode.MODE_VELOCITY
         )
         return motion_update_msg
+
+    def _wait_for_roi_observation(self, timeout_sec: float = 1.0):
+        """等待 observations_roi 消息。"""
+        start_time = time.time()
+        while time.time() - start_time < timeout_sec:
+            if self._observation_roi_msg is not None:
+                return self._observation_roi_msg
+            self.sleep_for(0.01)
+        return None
+
+    def _wait_for_next_roi_observation(
+        self,
+        previous_obs,
+        timeout_sec: float = 1.0,
+    ):
+        """等待下一个新的 observations_roi 消息。"""
+        previous_stamp = self._observation_stamp_ns(previous_obs)
+        start_time = time.time()
+        while time.time() - start_time < timeout_sec:
+            if (
+                self._observation_roi_msg is not None
+                and self._observation_stamp_ns(self._observation_roi_msg) != previous_stamp
+            ):
+                return self._observation_roi_msg
+            self.sleep_for(0.01)
+        return None

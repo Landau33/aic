@@ -23,7 +23,7 @@ from pathlib import Path
 
 def _load_actor_task_config_module():
     module_path = Path(
-        "/home/young/ws_aic/hil-serl/examples/experiments/aic_cable_insertion/config.py"
+        "/home/yuang/ws_aic/hil-serl_aic/examples/experiments/aic_cable_insertion/config.py"
     )
     spec = importlib.util.spec_from_file_location(
         "hil_serl_actor_task_config",
@@ -50,6 +50,10 @@ class HilSerlTopicConfig:
     """与阶段切换和可选外部控制相关的 topic 配置。"""
 
     deep_insert_topic: str = "/aic/deep_insert"
+    observation_roi_topic: str = "observations_roi"
+    left_image_roi_topic: str = "observations_roi/left_image"
+    center_image_roi_topic: str = "observations_roi/center_image"
+    right_image_roi_topic: str = "observations_roi/right_image"
 
 
 @dataclass(frozen=True)
@@ -62,7 +66,7 @@ class HilSerlModelConfig:
         if _ACTOR_TRAIN_CONFIG is not None
         else "single-arm-fixed-gripper"
     )
-    checkpoint_path: str = "/home/young/ws_aic/hil-serl/examples/experiments/aic_cable_insertion/checkpoints_test"
+    checkpoint_path: str = "/home/yuang/ws_aic/hil-serl_aic/examples/experiments/aic_cable_insertion/checkpoints_test"
     checkpoint_step: int = 100000 
     seed: int = 42
     argmax: bool = False
@@ -83,8 +87,10 @@ class HilSerlModelConfig:
 class HilSerlObservationConfig:
     """把 AIC Observation 对齐到 HIL-SERL 输入时需要的配置。"""
 
-    image_width: int = _ACTOR_ENV_CONFIG.image_width if _ACTOR_ENV_CONFIG is not None else 128
-    image_height: int = _ACTOR_ENV_CONFIG.image_height if _ACTOR_ENV_CONFIG is not None else 128
+    image_width: int = 400
+    image_height: int = 400
+    roi_target_frame: str = "gripper/tcp"
+    roi_target_offset_xyz: tuple[float, float, float] = (0.0, 0.015385, 0.04045)
     image_keys: tuple[str, ...] = (
         _ACTOR_ENV_CONFIG.image_keys
         if _ACTOR_ENV_CONFIG is not None
@@ -161,8 +167,8 @@ class HilSerlRuntimeConfig:
 
     @property
     def workspace_root(self) -> Path:
-        return Path("/home/young/ws_aic")
+        return Path("/home/yuang/ws_aic")
 
     @property
     def hil_serl_root(self) -> Path:
-        return self.workspace_root / "hil-serl"
+        return self.workspace_root / "hil-serl_aic"
