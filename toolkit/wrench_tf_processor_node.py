@@ -6,12 +6,13 @@
 #   1) 订阅原始力/力矩与 tare，进行去皮 + TF 转换，发布:
 #      - /nic_insertion/processed_wrench
 #      - /nic_insertion/processed_wrench/filtered  (1s 滑动平均)
-#   2) 本节点不做可视化，可配合 wrench_plot_node 使用
+#   2) 同时实时绘制 processed / filtered 的 force 和 torque 曲线
 
 from collections import deque
 import copy
 import sys
 
+import matplotlib.pyplot as plt
 import numpy as np
 import rclpy
 from rclpy.duration import Duration
@@ -46,6 +47,8 @@ class WrenchTFProcessorNode(Node):
         self.declare_parameter("output_topic", "/nic_insertion/processed_wrench")
         self.declare_parameter("output_filtered_topic", "/nic_insertion/processed_wrench/filtered")
         self.declare_parameter("filter_window_sec", 1.0)
+        self.declare_parameter("enable_plot", True)
+        self.declare_parameter("plot_window_sec", 20.0)
 
         self.target_frame = str(self.get_parameter("target_frame").value)
         self.source_frame = str(self.get_parameter("source_frame").value)
@@ -54,6 +57,8 @@ class WrenchTFProcessorNode(Node):
         self.output_topic = str(self.get_parameter("output_topic").value)
         self.output_filtered_topic = str(self.get_parameter("output_filtered_topic").value)
         self.filter_window_sec = float(self.get_parameter("filter_window_sec").value)
+        self.enable_plot = bool(self.get_parameter("enable_plot").value)
+        self.plot_window_sec = float(self.get_parameter("plot_window_sec").value)
 
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
@@ -63,6 +68,12 @@ class WrenchTFProcessorNode(Node):
 
         self.filter_time = deque()
         self.filter_wrench = deque()
+        self.plot_start_time = None
+        self.plot_times = deque()
+        self.plot_values = [deque() for _ in range(6)]
+        self.plot_times_filtered = deque()
+        self.plot_values_filtered = [deque() for _ in range(6)]
+        self.fig = None
 
         self.processed_pub = self.create_publisher(WrenchStamped, self.output_topic, 10)
         self.filtered_pub = self.create_publisher(WrenchStamped, self.output_filtered_topic, 10)
@@ -81,12 +92,65 @@ class WrenchTFProcessorNode(Node):
         )
 
         self.create_timer(0.02, self.timer_callback)
+        if self.enable_plot:
+            self._init_plot()
 
         self.get_logger().info(f"target_frame: {self.target_frame}")
         self.get_logger().info(f"source_frame: {self.source_frame}")
         self.get_logger().info(f"publishing: {self.output_topic}")
         self.get_logger().info(f"publishing: {self.output_filtered_topic}")
+        self.get_logger().info(f"plot enabled: {self.enable_plot}")
         self.get_logger().info("wrench flow: raw -> tare -> tf(target_frame) -> filtered")
+
+    def _init_plot(self):
+        self.fig, (
+            self.ax_force,
+            self.ax_force_filtered,
+            self.ax_torque,
+            self.ax_torque_filtered,
+        ) = plt.subplots(4, 1, figsize=(10, 12), sharex=True)
+
+        self.lines_force = [
+            self.ax_force.plot([], [], label=label)[0]
+            for label in ("Fx", "Fy", "Fz")
+        ]
+        self.lines_force_filtered = [
+            self.ax_force_filtered.plot([], [], label=f"{label} (filtered)")[0]
+            for label in ("Fx", "Fy", "Fz")
+        ]
+        self.lines_torque = [
+            self.ax_torque.plot([], [], label=label)[0]
+            for label in ("Tx", "Ty", "Tz")
+        ]
+        self.lines_torque_filtered = [
+            self.ax_torque_filtered.plot([], [], label=f"{label} (filtered)")[0]
+            for label in ("Tx", "Ty", "Tz")
+        ]
+
+        self.ax_force.set_title("Processed Wrench - Force")
+        self.ax_force.set_ylabel("Force (N)")
+        self.ax_force.legend(loc="upper right")
+        self.ax_force.grid(True)
+
+        self.ax_force_filtered.set_title(
+            f"Processed Wrench - Force ({self.filter_window_sec:.1f}s Filtered)"
+        )
+        self.ax_force_filtered.set_ylabel("Force (N)")
+        self.ax_force_filtered.legend(loc="upper right")
+        self.ax_force_filtered.grid(True)
+
+        self.ax_torque.set_title("Processed Wrench - Torque")
+        self.ax_torque.set_ylabel("Torque (Nm)")
+        self.ax_torque.legend(loc="upper right")
+        self.ax_torque.grid(True)
+
+        self.ax_torque_filtered.set_title(
+            f"Processed Wrench - Torque ({self.filter_window_sec:.1f}s Filtered)"
+        )
+        self.ax_torque_filtered.set_xlabel("Time (s)")
+        self.ax_torque_filtered.set_ylabel("Torque (Nm)")
+        self.ax_torque_filtered.legend(loc="upper right")
+        self.ax_torque_filtered.grid(True)
 
     def wrench_callback(self, msg: WrenchStamped):
         self.current_wrench = msg
@@ -129,6 +193,51 @@ class WrenchTFProcessorNode(Node):
         msg.wrench.torque.z = float(vec[5])
         topic_pub.publish(msg)
         return msg
+
+    def _record_plot_sample(self, vec: np.ndarray, now_sec: float, filtered: bool):
+        if not self.enable_plot:
+            return
+        if self.plot_start_time is None:
+            self.plot_start_time = now_sec
+
+        times = self.plot_times_filtered if filtered else self.plot_times
+        values = self.plot_values_filtered if filtered else self.plot_values
+        plot_time = now_sec - self.plot_start_time
+        times.append(plot_time)
+        for idx, value in enumerate(vec):
+            values[idx].append(float(value))
+
+        while times and (times[-1] - times[0] > self.plot_window_sec):
+            times.popleft()
+            for values_for_axis in values:
+                values_for_axis.popleft()
+
+    def update_plot(self):
+        if not self.enable_plot or self.fig is None:
+            return
+        if not self.plot_times and not self.plot_times_filtered:
+            return
+
+        x_data = list(self.plot_times)
+        x_data_filtered = list(self.plot_times_filtered)
+
+        for idx, line in enumerate(self.lines_force):
+            line.set_data(x_data, list(self.plot_values[idx]))
+        for idx, line in enumerate(self.lines_torque):
+            line.set_data(x_data, list(self.plot_values[idx + 3]))
+        for idx, line in enumerate(self.lines_force_filtered):
+            line.set_data(x_data_filtered, list(self.plot_values_filtered[idx]))
+        for idx, line in enumerate(self.lines_torque_filtered):
+            line.set_data(x_data_filtered, list(self.plot_values_filtered[idx + 3]))
+
+        for axis in (
+            self.ax_force,
+            self.ax_force_filtered,
+            self.ax_torque,
+            self.ax_torque_filtered,
+        ):
+            axis.relim()
+            axis.autoscale_view()
 
     def timer_callback(self):
         if self.current_tared_wrench is None:
@@ -176,6 +285,8 @@ class WrenchTFProcessorNode(Node):
 
         self._publish_wrench(raw_wrench, self.target_frame, self.processed_pub)
         self._publish_wrench(filtered_wrench, self.target_frame, self.filtered_pub)
+        self._record_plot_sample(raw_wrench, now_sec, filtered=False)
+        self._record_plot_sample(filtered_wrench, now_sec, filtered=True)
 
 
 def main(args=None):
@@ -188,12 +299,21 @@ def main(args=None):
         ])
 
     try:
-        rclpy.spin(node)
+        if node.enable_plot:
+            plt.ion()
+            while rclpy.ok() and node.fig is not None and plt.fignum_exists(node.fig.number):
+                rclpy.spin_once(node, timeout_sec=0.05)
+                node.update_plot()
+                plt.pause(0.05)
+        else:
+            rclpy.spin(node)
     except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
         node.destroy_node()
         rclpy.shutdown()
+        if node.enable_plot:
+            plt.close("all")
 
 
 if __name__ == "__main__":
