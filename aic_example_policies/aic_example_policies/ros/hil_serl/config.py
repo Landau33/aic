@@ -84,11 +84,21 @@ class HilSerlModelConfig:
 
 
 @dataclass(frozen=True)
+class HilSerlCameraRoiConfig:
+    """单路相机 ROI 的手动裁剪参数。"""
+
+    width: int = 800
+    height: int = 800
+    offset_x: float = 0.0
+    offset_y: float = 0.0
+
+
+@dataclass(frozen=True)
 class HilSerlObservationConfig:
     """把 AIC Observation 对齐到 HIL-SERL 输入时需要的配置。"""
 
-    image_width: int = 400
-    image_height: int = 400
+    image_width: int = 800
+    image_height: int = 800
     roi_target_frame: str = "gripper/tcp"
     roi_target_offset_xyz: tuple[float, float, float] = (0.0, 0.015385, 0.04045)
     image_keys: tuple[str, ...] = (
@@ -97,6 +107,30 @@ class HilSerlObservationConfig:
         else ("left_camera", "center_camera", "right_camera")
     )
     aic_image_topics: tuple[str, ...] = ("left", "center", "right")
+    left_camera_roi: HilSerlCameraRoiConfig = field(
+        default_factory=lambda: HilSerlCameraRoiConfig(
+            width=300,
+            height=300,
+            offset_x=100.0,
+            offset_y=-100.0,
+        )
+    )
+    center_camera_roi: HilSerlCameraRoiConfig = field(
+        default_factory=lambda: HilSerlCameraRoiConfig(
+            width=200,
+            height=400,
+            offset_x=0.0,
+            offset_y=-180.0,
+        )
+    )
+    right_camera_roi: HilSerlCameraRoiConfig = field(
+        default_factory=lambda: HilSerlCameraRoiConfig(
+            width=300,
+            height=300,
+            offset_x=-100.0,
+            offset_y=-100.0,
+        )
+    )
     observation_horizon: int = 1
     proprio_keys: tuple[str, ...] = (
         _ACTOR_ENV_CONFIG.proprio_keys

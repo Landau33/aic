@@ -34,7 +34,10 @@ from std_msgs.msg import String
 from tf2_ros import TransformException
 
 from .hil_serl.adapter import HilSerlActionAdapter, HilSerlObservationAdapter
-from .hil_serl.config import HilSerlRuntimeConfig
+from .hil_serl.config import (
+    HilSerlCameraRoiConfig,
+    HilSerlRuntimeConfig,
+)
 from .hil_serl.runtime import HilSerlActorRuntime
 
 
@@ -73,7 +76,9 @@ class TestPolicy(Policy):
             dtype=np.float64,
         )
         self._last_background_roi_publish_time = 0.0
-        self._background_roi_publish_period_sec = 0.2
+        self._background_roi_publish_period_sec = 0.1
+        self._last_logged_roi_params = {}
+        self._declare_live_roi_parameters()
 
         self._deep_insert = False
         self._deepinsert_event_sub = parent_node.create_subscription(
@@ -83,6 +88,30 @@ class TestPolicy(Policy):
             10,
         )
         self.get_logger().info("TestPolicy.__init__()")
+
+    def _declare_live_roi_parameters(self) -> None:
+        for camera_name in ("left", "center", "right"):
+            roi = self._camera_roi_config_default(camera_name)
+            self._declare_parameter_if_needed(
+                f"hil_serl.roi.{camera_name}.width",
+                int(roi.width),
+            )
+            self._declare_parameter_if_needed(
+                f"hil_serl.roi.{camera_name}.height",
+                int(roi.height),
+            )
+            self._declare_parameter_if_needed(
+                f"hil_serl.roi.{camera_name}.offset_x",
+                float(roi.offset_x),
+            )
+            self._declare_parameter_if_needed(
+                f"hil_serl.roi.{camera_name}.offset_y",
+                float(roi.offset_y),
+            )
+
+    def _declare_parameter_if_needed(self, name: str, value) -> None:
+        if not self._parent_node.has_parameter(name):
+            self._parent_node.declare_parameter(name, value)
 
     def _on_deepinsert_event(self, msg: String) -> None:
         self._deep_insert = msg.data.strip().lower() == "true"
@@ -104,29 +133,35 @@ class TestPolicy(Policy):
         roi_msg.wrist_wrench = msg.wrist_wrench
         roi_msg.joint_states = msg.joint_states
 
-        crop_width = self._config.observation.image_width
-        crop_height = self._config.observation.image_height
-
         try:
+            left_roi = self._camera_roi_config("left")
             roi_msg.left_image, roi_msg.left_camera_info = self._crop_around_tcp_projection(
                 msg.left_image,
                 msg.left_camera_info,
-                crop_width,
-                crop_height,
+                left_roi.width,
+                left_roi.height,
+                left_roi.offset_x,
+                left_roi.offset_y,
                 "left",
             )
+            center_roi = self._camera_roi_config("center")
             roi_msg.center_image, roi_msg.center_camera_info = self._crop_around_tcp_projection(
                 msg.center_image,
                 msg.center_camera_info,
-                crop_width,
-                crop_height,
+                center_roi.width,
+                center_roi.height,
+                center_roi.offset_x,
+                center_roi.offset_y,
                 "center",
             )
+            right_roi = self._camera_roi_config("right")
             roi_msg.right_image, roi_msg.right_camera_info = self._crop_around_tcp_projection(
                 msg.right_image,
                 msg.right_camera_info,
-                crop_width,
-                crop_height,
+                right_roi.width,
+                right_roi.height,
+                right_roi.offset_x,
+                right_roi.offset_y,
                 "right",
             )
         except Exception as exc:
@@ -141,9 +176,59 @@ class TestPolicy(Policy):
         if self._roi_publish_count % 20 == 1:
             self.get_logger().info(
                 f"Published {self._config.topics.observation_roi_topic} "
-                f"{crop_width}x{crop_height}"
+                f"left={roi_msg.left_image.width}x{roi_msg.left_image.height}, "
+                f"center={roi_msg.center_image.width}x{roi_msg.center_image.height}, "
+                f"right={roi_msg.right_image.width}x{roi_msg.right_image.height}"
             )
         return roi_msg
+
+    def _camera_roi_config_default(self, camera_name: str):
+        observation_config = self._config.observation
+        if camera_name == "left":
+            return observation_config.left_camera_roi
+        if camera_name == "center":
+            return observation_config.center_camera_roi
+        if camera_name == "right":
+            return observation_config.right_camera_roi
+        raise ValueError(f"Unknown camera ROI config: {camera_name}")
+
+    def _camera_roi_config(self, camera_name: str) -> HilSerlCameraRoiConfig:
+        default = self._camera_roi_config_default(camera_name)
+        width = int(
+            self._parent_node.get_parameter(
+                f"hil_serl.roi.{camera_name}.width"
+            ).value
+        )
+        height = int(
+            self._parent_node.get_parameter(
+                f"hil_serl.roi.{camera_name}.height"
+            ).value
+        )
+        offset_x = float(
+            self._parent_node.get_parameter(
+                f"hil_serl.roi.{camera_name}.offset_x"
+            ).value
+        )
+        offset_y = float(
+            self._parent_node.get_parameter(
+                f"hil_serl.roi.{camera_name}.offset_y"
+            ).value
+        )
+        roi = HilSerlCameraRoiConfig(
+            width=max(1, width),
+            height=max(1, height),
+            offset_x=offset_x,
+            offset_y=offset_y,
+        )
+        logged = (roi.width, roi.height, roi.offset_x, roi.offset_y)
+        if self._last_logged_roi_params.get(camera_name) != logged:
+            self._last_logged_roi_params[camera_name] = logged
+            self.get_logger().info(
+                f"Live ROI {camera_name}: "
+                f"{roi.width}x{roi.height}, "
+                f"offset=({roi.offset_x:.1f}, {roi.offset_y:.1f})"
+            )
+        return roi
 
     def _crop_center(
         self,
@@ -168,6 +253,8 @@ class TestPolicy(Policy):
         camera_info_msg,
         crop_width: int,
         crop_height: int,
+        pixel_offset_x: float,
+        pixel_offset_y: float,
         camera_name: str,
     ) -> tuple[Image, object]:
         """Crop around the projected TCP offset point, falling back to image center."""
@@ -184,8 +271,8 @@ class TestPolicy(Policy):
                 camera_info_msg,
                 crop_width,
                 crop_height,
-                center_x=None,
-                center_y=None,
+                center_x=pixel_offset_x if pixel_offset_x != 0.0 else None,
+                center_y=pixel_offset_y if pixel_offset_y != 0.0 else None,
             )
 
         return self._crop_around_pixel(
@@ -193,8 +280,8 @@ class TestPolicy(Policy):
             camera_info_msg,
             crop_width,
             crop_height,
-            center_x=projected_center[0],
-            center_y=projected_center[1],
+            center_x=projected_center[0] + float(pixel_offset_x),
+            center_y=projected_center[1] + float(pixel_offset_y),
         )
 
     def _crop_around_pixel(
