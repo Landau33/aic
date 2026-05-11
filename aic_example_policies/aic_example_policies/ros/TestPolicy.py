@@ -135,34 +135,40 @@ class TestPolicy(Policy):
 
         try:
             left_roi = self._camera_roi_config("left")
-            roi_msg.left_image, roi_msg.left_camera_info = self._crop_around_tcp_projection(
-                msg.left_image,
-                msg.left_camera_info,
-                left_roi.width,
-                left_roi.height,
-                left_roi.offset_x,
-                left_roi.offset_y,
-                "left",
+            roi_msg.left_image, roi_msg.left_camera_info = (
+                self._crop_around_tcp_projection(
+                    msg.left_image,
+                    msg.left_camera_info,
+                    left_roi.width,
+                    left_roi.height,
+                    left_roi.offset_x,
+                    left_roi.offset_y,
+                    "left",
+                )
             )
             center_roi = self._camera_roi_config("center")
-            roi_msg.center_image, roi_msg.center_camera_info = self._crop_around_tcp_projection(
-                msg.center_image,
-                msg.center_camera_info,
-                center_roi.width,
-                center_roi.height,
-                center_roi.offset_x,
-                center_roi.offset_y,
-                "center",
+            roi_msg.center_image, roi_msg.center_camera_info = (
+                self._crop_around_tcp_projection(
+                    msg.center_image,
+                    msg.center_camera_info,
+                    center_roi.width,
+                    center_roi.height,
+                    center_roi.offset_x,
+                    center_roi.offset_y,
+                    "center",
+                )
             )
             right_roi = self._camera_roi_config("right")
-            roi_msg.right_image, roi_msg.right_camera_info = self._crop_around_tcp_projection(
-                msg.right_image,
-                msg.right_camera_info,
-                right_roi.width,
-                right_roi.height,
-                right_roi.offset_x,
-                right_roi.offset_y,
-                "right",
+            roi_msg.right_image, roi_msg.right_camera_info = (
+                self._crop_around_tcp_projection(
+                    msg.right_image,
+                    msg.right_camera_info,
+                    right_roi.width,
+                    right_roi.height,
+                    right_roi.offset_x,
+                    right_roi.offset_y,
+                    "right",
+                )
             )
         except Exception as exc:
             self.get_logger().warn(f"Failed to build observations_roi: {exc}")
@@ -195,14 +201,10 @@ class TestPolicy(Policy):
     def _camera_roi_config(self, camera_name: str) -> HilSerlCameraRoiConfig:
         default = self._camera_roi_config_default(camera_name)
         width = int(
-            self._parent_node.get_parameter(
-                f"hil_serl.roi.{camera_name}.width"
-            ).value
+            self._parent_node.get_parameter(f"hil_serl.roi.{camera_name}.width").value
         )
         height = int(
-            self._parent_node.get_parameter(
-                f"hil_serl.roi.{camera_name}.height"
-            ).value
+            self._parent_node.get_parameter(f"hil_serl.roi.{camera_name}.height").value
         )
         offset_x = float(
             self._parent_node.get_parameter(
@@ -341,7 +343,9 @@ class TestPolicy(Policy):
         self._scale_camera_info(camera_info, scale_x, scale_y)
         return cropped_msg, camera_info
 
-    def _project_roi_target_to_image(self, camera_info_msg) -> tuple[float, float] | None:
+    def _project_roi_target_to_image(
+        self, camera_info_msg
+    ) -> tuple[float, float] | None:
         camera_frame = getattr(getattr(camera_info_msg, "header", None), "frame_id", "")
         if not camera_frame:
             return None
@@ -384,15 +388,22 @@ class TestPolicy(Policy):
         rotation = transform.transform.rotation
         offset = self._rotate_vector_by_quaternion(
             self._roi_target_offset_xyz,
-            np.array([rotation.x, rotation.y, rotation.z, rotation.w], dtype=np.float64),
+            np.array(
+                [rotation.x, rotation.y, rotation.z, rotation.w], dtype=np.float64
+            ),
         )
-        return np.array(
-            [translation.x, translation.y, translation.z],
-            dtype=np.float64,
-        ) + offset
+        return (
+            np.array(
+                [translation.x, translation.y, translation.z],
+                dtype=np.float64,
+            )
+            + offset
+        )
 
     @staticmethod
-    def _rotate_vector_by_quaternion(vector: np.ndarray, quat_xyzw: np.ndarray) -> np.ndarray:
+    def _rotate_vector_by_quaternion(
+        vector: np.ndarray, quat_xyzw: np.ndarray
+    ) -> np.ndarray:
         quat_xyzw = np.asarray(quat_xyzw, dtype=np.float64)
         norm = np.linalg.norm(quat_xyzw)
         if norm <= 0.0:
@@ -570,7 +581,9 @@ class TestPolicy(Policy):
                         self._publish_observation_roi(obs_msg)
                     send_feedback("等待 motion_planning 发布 deep_insert=true")
                     self.sleep_for(0.5)
-                self.get_logger().info("重新收到 deep_insert=true，恢复 HIL-SERL 推理。")
+                self.get_logger().info(
+                    "重新收到 deep_insert=true，恢复 HIL-SERL 推理。"
+                )
                 start_time = time.time()
                 missing_obs_count = 0
 

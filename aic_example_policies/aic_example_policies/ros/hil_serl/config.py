@@ -66,8 +66,10 @@ class HilSerlModelConfig:
         if _ACTOR_TRAIN_CONFIG is not None
         else "single-arm-fixed-gripper"
     )
-    checkpoint_path: str = "/home/yuang/ws_aic/hil-serl_aic/examples/experiments/aic_cable_insertion/checkpoints_test"
-    checkpoint_step: int = 100000 
+    checkpoint_path: str = (
+        "/home/yuang/ws_aic/hil-serl_aic/examples/experiments/aic_cable_insertion/checkpoints_test1"
+    )
+    checkpoint_step: int = 100000
     seed: int = 42
     argmax: bool = False
     encoder_type: str = (
@@ -158,9 +160,7 @@ class HilSerlControlConfig:
         else 0.10
     )
     action_scale_linear: float = (
-        _ACTOR_ENV_CONFIG.action_scale_linear
-        if _ACTOR_ENV_CONFIG is not None
-        else 0.01
+        _ACTOR_ENV_CONFIG.action_scale_linear if _ACTOR_ENV_CONFIG is not None else 0.01
     )
     action_scale_angular: float = (
         _ACTOR_ENV_CONFIG.action_scale_angular
@@ -194,7 +194,9 @@ class HilSerlRuntimeConfig:
     """AIC 侧 HIL-SERL actor 推理的总配置。"""
 
     model: HilSerlModelConfig = field(default_factory=HilSerlModelConfig)
-    observation: HilSerlObservationConfig = field(default_factory=HilSerlObservationConfig)
+    observation: HilSerlObservationConfig = field(
+        default_factory=HilSerlObservationConfig
+    )
     control: HilSerlControlConfig = field(default_factory=HilSerlControlConfig)
     safety: HilSerlSafetyConfig = field(default_factory=HilSerlSafetyConfig)
     topics: HilSerlTopicConfig = field(default_factory=HilSerlTopicConfig)

@@ -53,11 +53,19 @@ from scipy.spatial.transform import Rotation as R, Slerp
 
 from tf2_ros import Buffer, TransformListener
 from tf2_geometry_msgs import do_transform_vector3
-from geometry_msgs.msg import Pose, Twist, Wrench, WrenchStamped, Vector3, Quaternion, Vector3Stamped
+from geometry_msgs.msg import (
+    Pose,
+    Twist,
+    Wrench,
+    WrenchStamped,
+    Vector3,
+    Quaternion,
+    Vector3Stamped,
+)
 from aic_control_interfaces.msg import (
     MotionUpdate,
     TrajectoryGenerationMode,
-    ControllerState
+    ControllerState,
 )
 from std_msgs.msg import String
 from rclpy.parameter import Parameter
@@ -66,34 +74,44 @@ from rclpy.parameter import Parameter
 class AICCartesianTrajectoryNode(Node):
     def __init__(self):
         super().__init__("aic_trajectory_to_proximity")
-        self.set_parameters([
-            Parameter(
-                'use_sim_time',
-                Parameter.Type.BOOL,
-                True,
-            )
-        ])
+        self.set_parameters(
+            [
+                Parameter(
+                    "use_sim_time",
+                    Parameter.Type.BOOL,
+                    True,
+                )
+            ]
+        )
 
         # ======================== 参数 ========================
-        self.declare_parameter("duration_sec", 8.0)          # 总插值时间（秒）
-        self.declare_parameter("publish_rate", 25.0)         # 发布频率 Hz
-        self.declare_parameter("frame_id", "base_link")    # 参考帧：gripper/tcp 或 base_link
+        self.declare_parameter("duration_sec", 8.0)  # 总插值时间（秒）
+        self.declare_parameter("publish_rate", 25.0)  # 发布频率 Hz
+        self.declare_parameter(
+            "frame_id", "base_link"
+        )  # 参考帧：gripper/tcp 或 base_link
         self.declare_parameter("controller_namespace", "aic_controller")
-        self.declare_parameter("use_static_target", True)    # 是否使用静态目标位姿
+        self.declare_parameter("use_static_target", True)  # 是否使用静态目标位姿
         self.declare_parameter("tcp_frame", "gripper/tcp")
         self.declare_parameter("nic_port_frame", "nic_port_rec")
-        self.declare_parameter("z_velocity", -0.02)          # Z 负方向速度（m/s）
-        self.declare_parameter("force_threshold", 10.0)      # Z 力阈值（N）
+        self.declare_parameter("z_velocity", -0.02)  # Z 负方向速度（m/s）
+        self.declare_parameter("force_threshold", 10.0)  # Z 力阈值（N）
         # ======================== 螺旋搜索参数 ========================
         self.declare_parameter("spiral_radial_speed", 0.0015)  # 半径增加速度 (m/s)
-        self.declare_parameter("spiral_omega", 3.0)            # 旋转角速度 (rad/s)
-        self.declare_parameter("spiral_max_time", 20.0)        # 最大搜索时间 (s)
-        self.declare_parameter("spiral_z_velocity", -0.005)    # 搜索时Z轴下压速度，保持贴合
+        self.declare_parameter("spiral_omega", 3.0)  # 旋转角速度 (rad/s)
+        self.declare_parameter("spiral_max_time", 20.0)  # 最大搜索时间 (s)
+        self.declare_parameter(
+            "spiral_z_velocity", -0.005
+        )  # 搜索时Z轴下压速度，保持贴合
         # ======================== Deep Insert handoff参数 ========================
-        self.declare_parameter("handoff_to_test_policy", True) 
-        self.declare_parameter("deep_insert_topic", "/aic/deep_insert") 
-        self.declare_parameter("handoff_lift_distance", 0.002) # 孔洞找到后提升的距离（m）
-        self.declare_parameter("handoff_hold_duration", 1.0) # 孔洞找到后保持的时间（s）
+        self.declare_parameter("handoff_to_test_policy", True)
+        self.declare_parameter("deep_insert_topic", "/aic/deep_insert")
+        self.declare_parameter(
+            "handoff_lift_distance", 0.002
+        )  # 孔洞找到后提升的距离（m）
+        self.declare_parameter(
+            "handoff_hold_duration", 1.0
+        )  # 孔洞找到后保持的时间（s）
 
         self.duration_sec = self.get_parameter("duration_sec").value
         self.publish_rate = self.get_parameter("publish_rate").value
@@ -112,25 +130,27 @@ class AICCartesianTrajectoryNode(Node):
         self.deep_insert_topic = self.get_parameter("deep_insert_topic").value
         self.handoff_lift_distance = self.get_parameter("handoff_lift_distance").value
         self.handoff_hold_duration = self.get_parameter("handoff_hold_duration").value
-        
+
         self.get_logger().info(f"Trajectory duration: {self.duration_sec} s")
         self.get_logger().info(f"Publish rate: {self.publish_rate} Hz")
         self.get_logger().info(f"Target frame mode: {self.frame_id}")
-        self.get_logger().info(f"Use static target: {self.use_static_target} "
-                              f"(True=固定初始目标, False=动态跟踪)")
+        self.get_logger().info(
+            f"Use static target: {self.use_static_target} "
+            f"(True=固定初始目标, False=动态跟踪)"
+        )
         self.get_logger().info(f"TCP frame: {self.tcp_frame}")
         self.get_logger().info(f"NIC port frame: {self.nic_port_frame}")
         self.get_logger().info(f"Z velocity: {self.z_velocity} m/s")
         self.get_logger().info(f"Force threshold: {self.force_threshold} N")
-        self.get_logger().info(f"Handoff to TestPolicy after hole found: {self.handoff_to_test_policy}")
+        self.get_logger().info(
+            f"Handoff to TestPolicy after hole found: {self.handoff_to_test_policy}"
+        )
         self.get_logger().info(f"Handoff lift distance: {self.handoff_lift_distance} m")
         self.get_logger().info(f"Handoff hold duration: {self.handoff_hold_duration} s")
 
         # ======================== 发布器 ========================
         self.motion_pub = self.create_publisher(
-            MotionUpdate,
-            f"/{self.controller_ns}/pose_commands",
-            10
+            MotionUpdate, f"/{self.controller_ns}/pose_commands", 10
         )
         self.deep_insert_pub = self.create_publisher(
             String,
@@ -147,18 +167,15 @@ class AICCartesianTrajectoryNode(Node):
         self.init_wrench = None
         self.current_wrench = None
         self.current_tared_wrench = None
-        self.current_tare_offset_z = 0.0          # 当前 Z 方向 tare offset
+        self.current_tare_offset_z = 0.0  # 当前 Z 方向 tare offset
         self.state_sub = self.create_subscription(
             ControllerState,
-            '/aic_controller/controller_state',
+            "/aic_controller/controller_state",
             self.controller_state_callback,
-            10
+            10,
         )
         self.wrench_sub = self.create_subscription(
-            WrenchStamped,
-            '/fts_broadcaster/wrench',
-            self.wrench_callback,
-            10
+            WrenchStamped, "/fts_broadcaster/wrench", self.wrench_callback, 10
         )
 
         # ======================== TF2 ========================
@@ -168,14 +185,14 @@ class AICCartesianTrajectoryNode(Node):
         self._last_target_warn_time = 0.0
 
         # ======================== 轨迹状态 ========================
-        self.start_pose = None          # 开始时的 TCP pose
-        self.target_pose = None         # 估计目标位姿（静态或动态）
-        self.start_time = None          # 开始插值的时间戳
+        self.start_pose = None  # 开始时的 TCP pose
+        self.target_pose = None  # 估计目标位姿（静态或动态）
+        self.start_time = None  # 开始插值的时间戳
         self.trajectory_active = False  # 是否正在执行位置轨迹
-        self.velocity_active = False    # 是否正在执行速度模式
-        self.pause_start = None         # 暂停开始时间戳
-        self.spiral_search_active = False    # 是否正在执行Spiral Search
-        self.spiral_start_time = None   # 记录螺旋搜索开始的时间
+        self.velocity_active = False  # 是否正在执行速度模式
+        self.pause_start = None  # 暂停开始时间戳
+        self.spiral_search_active = False  # 是否正在执行Spiral Search
+        self.spiral_start_time = None  # 记录螺旋搜索开始的时间
         self.deep_insert_sent = False
         self.handoff_lift_active = False
         self.handoff_hold_active = False
@@ -193,10 +210,11 @@ class AICCartesianTrajectoryNode(Node):
     def wrench_callback(self, msg: WrenchStamped):
         self.current_wrench = msg
         msg.wrench.force.x
+
     def controller_state_callback(self, msg: ControllerState):
         if self.current_wrench is None:
             return
-        
+
         self.current_tared_wrench = copy.deepcopy(self.current_wrench)
         fts_tare_offset = msg.fts_tare_offset.wrench
         self.current_tared_wrench.wrench.force.x -= fts_tare_offset.force.x
@@ -209,16 +227,22 @@ class AICCartesianTrajectoryNode(Node):
         # self.get_logger().info(f"Tared force z: {self.current_tared_wrench.wrench.force.z} N")
 
     def _build_target_quaternion(self):
-        r_current = np.array([
-            [-0.998, 0.001, -0.056],
-            [-0.052, 0.353, 0.934],
-            [0.021, 0.935, -0.353],
-        ], dtype=np.float64)
-        r_target = np.array([
-            [-1.0, 0.0, 0.0],
-            [0.0, 0.0, 1.0],
-            [0.0, 1.0, 0.0],
-        ], dtype=np.float64)
+        r_current = np.array(
+            [
+                [-0.998, 0.001, -0.056],
+                [-0.052, 0.353, 0.934],
+                [0.021, 0.935, -0.353],
+            ],
+            dtype=np.float64,
+        )
+        r_target = np.array(
+            [
+                [-1.0, 0.0, 0.0],
+                [0.0, 0.0, 1.0],
+                [0.0, 1.0, 0.0],
+            ],
+            dtype=np.float64,
+        )
         r_relative = np.linalg.inv(r_current) @ r_target
         return R.from_matrix(r_relative).as_quat()
 
@@ -226,7 +250,10 @@ class AICCartesianTrajectoryNode(Node):
         """获取当前 tcp_frame 的位姿（相对于 base_link）"""
         try:
             trans = self.tf_buffer.lookup_transform(
-                "base_link", self.tcp_frame, rclpy.time.Time(), timeout=Duration(seconds=1.0)
+                "base_link",
+                self.tcp_frame,
+                rclpy.time.Time(),
+                timeout=Duration(seconds=1.0),
             )
             p = trans.transform.translation
             q = trans.transform.rotation
@@ -244,10 +271,16 @@ class AICCartesianTrajectoryNode(Node):
         """根据 nic_port_rec 估计目标位姿（相对于 base_link）。"""
         try:
             tcp_tf = self.tf_buffer.lookup_transform(
-                "base_link", self.tcp_frame, rclpy.time.Time(), timeout=Duration(seconds=0.5)
+                "base_link",
+                self.tcp_frame,
+                rclpy.time.Time(),
+                timeout=Duration(seconds=0.5),
             )
             port_in_tcp_tf = self.tf_buffer.lookup_transform(
-                self.tcp_frame, self.nic_port_frame, rclpy.time.Time(), timeout=Duration(seconds=0.5)
+                self.tcp_frame,
+                self.nic_port_frame,
+                rclpy.time.Time(),
+                timeout=Duration(seconds=0.5),
             )
 
             tcp_translation = np.array(
@@ -274,7 +307,9 @@ class AICCartesianTrajectoryNode(Node):
                 ],
                 dtype=np.float64,
             )
-            target_translation = tcp_translation + tcp_rotation.apply(target_in_tcp_translation)
+            target_translation = tcp_translation + tcp_rotation.apply(
+                target_in_tcp_translation
+            )
             target_rotation = tcp_rotation * R.from_quat(self._target_quaternion)
             target_quat = target_rotation.as_quat()
 
@@ -310,9 +345,15 @@ class AICCartesianTrajectoryNode(Node):
         self.velocity_active = False  # 重置速度模式
 
         self.get_logger().info("Trajectory started:")
-        self.get_logger().info(f"  Start:  {self.start_pose.position.x:.3f}, {self.start_pose.position.y:.3f}, {self.start_pose.position.z:.3f}")
-        self.get_logger().info(f"  Target: {self.target_pose.position.x:.3f}, {self.target_pose.position.y:.3f}, {self.target_pose.position.z:.3f}")
-        self.get_logger().info(f"  Mode: {'Static' if self.use_static_target else 'Dynamic'}")
+        self.get_logger().info(
+            f"  Start:  {self.start_pose.position.x:.3f}, {self.start_pose.position.y:.3f}, {self.start_pose.position.z:.3f}"
+        )
+        self.get_logger().info(
+            f"  Target: {self.target_pose.position.x:.3f}, {self.target_pose.position.y:.3f}, {self.target_pose.position.z:.3f}"
+        )
+        self.get_logger().info(
+            f"  Mode: {'Static' if self.use_static_target else 'Dynamic'}"
+        )
 
         return True
 
@@ -331,25 +372,34 @@ class AICCartesianTrajectoryNode(Node):
                 self.target_pose = current_target
 
         # 线性插值位置
-        pos = np.array([
-            self.start_pose.position.x + t * (self.target_pose.position.x - self.start_pose.position.x),
-            self.start_pose.position.y + t * (self.target_pose.position.y - self.start_pose.position.y),
-            self.start_pose.position.z + t * (self.target_pose.position.z - self.start_pose.position.z),
-        ])
+        pos = np.array(
+            [
+                self.start_pose.position.x
+                + t * (self.target_pose.position.x - self.start_pose.position.x),
+                self.start_pose.position.y
+                + t * (self.target_pose.position.y - self.start_pose.position.y),
+                self.start_pose.position.z
+                + t * (self.target_pose.position.z - self.start_pose.position.z),
+            ]
+        )
 
         # SLERP 插值姿态
-        q_start = R.from_quat([
-            self.start_pose.orientation.x,
-            self.start_pose.orientation.y,
-            self.start_pose.orientation.z,
-            self.start_pose.orientation.w
-        ])
-        q_target = R.from_quat([
-            self.target_pose.orientation.x,
-            self.target_pose.orientation.y,
-            self.target_pose.orientation.z,
-            self.target_pose.orientation.w
-        ])
+        q_start = R.from_quat(
+            [
+                self.start_pose.orientation.x,
+                self.start_pose.orientation.y,
+                self.start_pose.orientation.z,
+                self.start_pose.orientation.w,
+            ]
+        )
+        q_target = R.from_quat(
+            [
+                self.target_pose.orientation.x,
+                self.target_pose.orientation.y,
+                self.target_pose.orientation.z,
+                self.target_pose.orientation.w,
+            ]
+        )
         slerp = Slerp([0, 1], R.concatenate([q_start, q_target]))
         q_interp = slerp(t)
 
@@ -366,12 +416,14 @@ class AICCartesianTrajectoryNode(Node):
 
         return pose
 
-    def generate_position_update(self, pose,
-                                 stiffness_diag=[800.0] * 6,
-                                 damping_diag=[60.0] * 6,
-                                 feedforward_wrench_at_tip=[0.0] * 6,
-                                 wrench_feedback_gains_at_tip=[0.0] * 6
-                                 ):
+    def generate_position_update(
+        self,
+        pose,
+        stiffness_diag=[800.0] * 6,
+        damping_diag=[60.0] * 6,
+        feedforward_wrench_at_tip=[0.0] * 6,
+        wrench_feedback_gains_at_tip=[0.0] * 6,
+    ):
         """生成位置模式的 MotionUpdate 消息"""
         msg = MotionUpdate()
         msg.header.stamp = self.get_clock().now().to_msg()
@@ -381,12 +433,20 @@ class AICCartesianTrajectoryNode(Node):
 
         # 推荐的刚度与阻尼（可调）
         msg.target_stiffness = np.diag(stiffness_diag).flatten().tolist()
-        msg.target_damping   = np.diag(damping_diag).flatten().tolist()
+        msg.target_damping = np.diag(damping_diag).flatten().tolist()
 
         # 无前馈力
         msg.feedforward_wrench_at_tip = Wrench(
-            force=Vector3(x=feedforward_wrench_at_tip[0], y=feedforward_wrench_at_tip[1], z=feedforward_wrench_at_tip[2]),
-            torque=Vector3(x=feedforward_wrench_at_tip[3], y=feedforward_wrench_at_tip[4], z=feedforward_wrench_at_tip[5])
+            force=Vector3(
+                x=feedforward_wrench_at_tip[0],
+                y=feedforward_wrench_at_tip[1],
+                z=feedforward_wrench_at_tip[2],
+            ),
+            torque=Vector3(
+                x=feedforward_wrench_at_tip[3],
+                y=feedforward_wrench_at_tip[4],
+                z=feedforward_wrench_at_tip[5],
+            ),
         )
         msg.wrench_feedback_gains_at_tip = wrench_feedback_gains_at_tip
 
@@ -395,12 +455,14 @@ class AICCartesianTrajectoryNode(Node):
 
         return msg
 
-    def generate_velocity_update(self, twist,
-                                 stiffness_diag=[800.0] * 6,
-                                 damping_diag=[60.0] * 6,
-                                 feedforward_wrench_at_tip=[0.0] * 6,
-                                 wrench_feedback_gains_at_tip=[0.0] * 6
-                                 ):
+    def generate_velocity_update(
+        self,
+        twist,
+        stiffness_diag=[800.0] * 6,
+        damping_diag=[60.0] * 6,
+        feedforward_wrench_at_tip=[0.0] * 6,
+        wrench_feedback_gains_at_tip=[0.0] * 6,
+    ):
         """生成速度模式的 MotionUpdate 消息"""
         msg = MotionUpdate()
         msg.header.stamp = self.get_clock().now().to_msg()
@@ -410,12 +472,20 @@ class AICCartesianTrajectoryNode(Node):
 
         # 速度模式下降低刚度（更柔顺）
         msg.target_stiffness = np.diag(stiffness_diag).flatten().tolist()
-        msg.target_damping   = np.diag(damping_diag).flatten().tolist()
+        msg.target_damping = np.diag(damping_diag).flatten().tolist()
 
         # 可选前馈力（向下压）
         msg.feedforward_wrench_at_tip = Wrench(
-            force=Vector3(x=feedforward_wrench_at_tip[0], y=feedforward_wrench_at_tip[1], z=feedforward_wrench_at_tip[2]),
-            torque=Vector3(x=feedforward_wrench_at_tip[3], y=feedforward_wrench_at_tip[4], z=feedforward_wrench_at_tip[5])
+            force=Vector3(
+                x=feedforward_wrench_at_tip[0],
+                y=feedforward_wrench_at_tip[1],
+                z=feedforward_wrench_at_tip[2],
+            ),
+            torque=Vector3(
+                x=feedforward_wrench_at_tip[3],
+                y=feedforward_wrench_at_tip[4],
+                z=feedforward_wrench_at_tip[5],
+            ),
         )
         msg.wrench_feedback_gains_at_tip = wrench_feedback_gains_at_tip
 
@@ -473,7 +543,11 @@ class AICCartesianTrajectoryNode(Node):
 
     def timer_callback(self):
         # 如果还没开始轨迹，尝试启动
-        if not self.trajectory_active and not self.velocity_active and not hasattr(self, 'trajectory_started'):
+        if (
+            not self.trajectory_active
+            and not self.velocity_active
+            and not hasattr(self, "trajectory_started")
+        ):
             if self.start_trajectory():
                 self.trajectory_started = True  # 永久标记已启动
                 return
@@ -510,7 +584,9 @@ class AICCartesianTrajectoryNode(Node):
                 msg = self.generate_position_update(self.target_pose)
                 self.motion_pub.publish(msg)
             else:
-                self.get_logger().info("Pause complete. Entering velocity mode (Z negative)...")
+                self.get_logger().info(
+                    "Pause complete. Entering velocity mode (Z negative)..."
+                )
                 self.pause_start = None
                 self.velocity_active = True
 
@@ -518,8 +594,10 @@ class AICCartesianTrajectoryNode(Node):
         elif self.velocity_active:
             # 检查 Z 力是否超过阈值
             if abs(self.current_tare_offset_z) > self.force_threshold:
-                self.get_logger().info(f"Surface detected! Z force {self.current_tare_offset_z:.2f} N > {self.force_threshold} N.")
-                
+                self.get_logger().info(
+                    f"Surface detected! Z force {self.current_tare_offset_z:.2f} N > {self.force_threshold} N."
+                )
+
                 # 状态机切换：停止向下移动，启动螺旋搜索
                 self.velocity_active = False
                 self.spiral_search_active = True
@@ -530,11 +608,13 @@ class AICCartesianTrajectoryNode(Node):
                 twist.linear.z = self.z_velocity  # 只 Z 负方向
 
                 # 发布速度指令
-                msg = self.generate_velocity_update(twist,
-                                                    stiffness_diag=[800.0, 800.0, 80.0, 800.0, 800.0, 800.0],
-                                                    damping_diag=[75.0, 75.0, 50.0, 75.0, 75.0, 75.0])
+                msg = self.generate_velocity_update(
+                    twist,
+                    stiffness_diag=[800.0, 800.0, 80.0, 800.0, 800.0, 800.0],
+                    damping_diag=[75.0, 75.0, 50.0, 75.0, 75.0, 75.0],
+                )
                 self.motion_pub.publish(msg)
-        
+
         # ======================== Spiral Search阶段 ========================
         elif self.spiral_search_active:
             now = self.get_clock().now()
@@ -542,15 +622,19 @@ class AICCartesianTrajectoryNode(Node):
 
             # 异常处理：检查是否超时
             if t > self.spiral_max_time:
-                self.get_logger().warn("Spiral search timeout! Hole not found. Stopping.")
+                self.get_logger().warn(
+                    "Spiral search timeout! Hole not found. Stopping."
+                )
                 self.spiral_search_active = False
-                msg = self.generate_velocity_update(Twist()) # 全0停止
+                msg = self.generate_velocity_update(Twist())  # 全0停止
                 self.motion_pub.publish(msg)
                 return
 
             # 成功检测：当Peg滑入孔中时，向上的支撑力会消失，Z轴阻力会急剧下降
             # 使用阈值的 30% 作为判断标准 (可以根据实际摩擦力微调)
-            if t > 0.5 and abs(self.current_tare_offset_z) < 5:         # (self.force_threshold * 0.3)
+            if (
+                t > 0.5 and abs(self.current_tare_offset_z) < 5
+            ):  # (self.force_threshold * 0.3)
                 self.get_logger().info(
                     f"Hole found! Z Force dropped to {self.current_tare_offset_z:.2f} N."
                 )
@@ -560,7 +644,9 @@ class AICCartesianTrajectoryNode(Node):
                 self.motion_pub.publish(msg)
 
                 if not self.start_handoff_hold():
-                    self.get_logger().warn("Unable to start handoff hold. Stopping with zero twist only.")
+                    self.get_logger().warn(
+                        "Unable to start handoff hold. Stopping with zero twist only."
+                    )
                     return
 
                 self.get_logger().info(
@@ -578,13 +664,17 @@ class AICCartesianTrajectoryNode(Node):
             twist = Twist()
             twist.linear.x = vx
             twist.linear.y = vy
-            twist.linear.z = self.spiral_z_velocity  # 保持微弱向下压迫，以保证不脱离表面并在遇到孔洞时自动掉入
+            twist.linear.z = (
+                self.spiral_z_velocity
+            )  # 保持微弱向下压迫，以保证不脱离表面并在遇到孔洞时自动掉入
 
             # 发布速度指令：注意我们要降低 XY 刚度，增加柔顺性，防止在滑动过程中卡死
-            msg = self.generate_velocity_update(twist,
-                                                stiffness_diag=[200.0, 200.0, 50.0, 800.0, 800.0, 800.0],
-                                                damping_diag=[30.0, 30.0, 50.0, 75.0, 75.0, 75.0],
-                                                feedforward_wrench_at_tip=[0.0, 0.0, 5.0, 0.0, 0.0, 0.0])
+            msg = self.generate_velocity_update(
+                twist,
+                stiffness_diag=[200.0, 200.0, 50.0, 800.0, 800.0, 800.0],
+                damping_diag=[30.0, 30.0, 50.0, 75.0, 75.0, 75.0],
+                feedforward_wrench_at_tip=[0.0, 0.0, 5.0, 0.0, 0.0, 0.0],
+            )
             self.motion_pub.publish(msg)
 
         # ======================== Handoff Lift阶段 ========================
@@ -597,9 +687,8 @@ class AICCartesianTrajectoryNode(Node):
             # Smoothstep gives zero velocity at the start/end of the lift.
             alpha = t * t * (3.0 - 2.0 * t)
             handoff_pose = self.copy_pose(self.handoff_start_pose)
-            handoff_pose.position.z = (
-                self.handoff_start_pose.position.z
-                + alpha * (self.handoff_hold_pose.position.z - self.handoff_start_pose.position.z)
+            handoff_pose.position.z = self.handoff_start_pose.position.z + alpha * (
+                self.handoff_hold_pose.position.z - self.handoff_start_pose.position.z
             )
             msg = self.generate_position_update(handoff_pose)
             self.motion_pub.publish(msg)
@@ -608,11 +697,15 @@ class AICCartesianTrajectoryNode(Node):
                 self.handoff_lift_active = False
                 self.handoff_hold_active = True
                 self.handoff_hold_start_time = self.get_clock().now()
-                self.get_logger().info("Handoff lift complete. Holding position for policy takeover.")
+                self.get_logger().info(
+                    "Handoff lift complete. Holding position for policy takeover."
+                )
 
         # ======================== Handoff Hold阶段 ========================
         elif self.handoff_hold_active:
-            hold_elapsed = (self.get_clock().now() - self.handoff_hold_start_time).nanoseconds / 1e9
+            hold_elapsed = (
+                self.get_clock().now() - self.handoff_hold_start_time
+            ).nanoseconds / 1e9
             if hold_elapsed < self.handoff_hold_duration:
                 msg = self.generate_position_update(self.handoff_hold_pose)
                 self.motion_pub.publish(msg)
@@ -624,26 +717,32 @@ class AICCartesianTrajectoryNode(Node):
                     )
                     self.publish_deep_insert_true()
                     self.deep_insert_sent = True
-                self.get_logger().info("Handoff hold complete. motion_planning stops publishing commands.")
-        
+                self.get_logger().info(
+                    "Handoff hold complete. motion_planning stops publishing commands."
+                )
+
         # ======================== 通用力控处理 ==============================
         if self.current_tared_wrench is None:
             return
         if self.init_wrench is None:
             self.init_wrench = copy.deepcopy(self.current_tared_wrench)
             return
-        
+
         try:
             force_stamped = Vector3Stamped()
-            force_stamped.header = self.current_tared_wrench.header        # frame_id = ati/tool_link
+            force_stamped.header = (
+                self.current_tared_wrench.header
+            )  # frame_id = ati/tool_link
             force_stamped.vector = self.current_tared_wrench.wrench.force
             force_stamped.vector.x -= self.init_wrench.wrench.force.x
             force_stamped.vector.y -= self.init_wrench.wrench.force.y
             force_stamped.vector.z -= self.init_wrench.wrench.force.z
             # 获取当前 ati/tool_link → base_link 的变换
             transform = self.tf_buffer.lookup_transform(
-                "base_link", "ati/tool_link",
-                rclpy.time.Time(), timeout=Duration(seconds=0.1)
+                "base_link",
+                "ati/tool_link",
+                rclpy.time.Time(),
+                timeout=Duration(seconds=0.1),
             )
 
             # 执行向量旋转转换
@@ -655,7 +754,11 @@ class AICCartesianTrajectoryNode(Node):
 
         except Exception as e:
             self.get_logger().warn(f"Force transform failed: {str(e)}")
-            self.current_tare_offset_z = self.current_tared_wrench.wrench.force.z - self.init_wrench.wrench.force.z
+            self.current_tare_offset_z = (
+                self.current_tared_wrench.wrench.force.z
+                - self.init_wrench.wrench.force.z
+            )
+
 
 def main(args=None):
     rclpy.init(args=args)

@@ -98,7 +98,9 @@ class HilSerlPolicy(Policy):
                 while not self._deep_insert:
                     send_feedback("等待 motion_planning 发布 deep_insert=true")
                     self.sleep_for(0.5)
-                self.get_logger().info("重新收到 deep_insert=true，恢复 HIL-SERL 推理。")
+                self.get_logger().info(
+                    "重新收到 deep_insert=true，恢复 HIL-SERL 推理。"
+                )
                 start_time = time.time()
                 missing_obs_count = 0
                 resumed_obs_msg = self._wait_for_observation(get_observation)
@@ -252,7 +254,8 @@ class HilSerlPolicy(Policy):
         while time.time() - start_time < timeout_sec:
             if (
                 self._observation_roi_msg is not None
-                and self._observation_stamp_ns(self._observation_roi_msg) != previous_stamp
+                and self._observation_stamp_ns(self._observation_roi_msg)
+                != previous_stamp
             ):
                 return self._observation_roi_msg
             self.sleep_for(0.01)

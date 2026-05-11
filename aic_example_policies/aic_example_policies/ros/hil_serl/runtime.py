@@ -127,10 +127,15 @@ class HilSerlActorRuntime:
 
     def predict(self, observation: ObservationDict) -> HilSerlAction:
         if not self._initialized:
-            raise RuntimeError("HilSerlActorRuntime must be initialized before predict().")
+            raise RuntimeError(
+                "HilSerlActorRuntime must be initialized before predict()."
+            )
 
         self._sampling_rng, key = self._jax.random.split(self._sampling_rng)
-        obs = {k: self._jax.device_put(self._jnp.asarray(v)) for k, v in observation.items()}
+        obs = {
+            k: self._jax.device_put(self._jnp.asarray(v))
+            for k, v in observation.items()
+        }
         actions = self._agent.sample_actions(
             observations=obs,
             seed=key,

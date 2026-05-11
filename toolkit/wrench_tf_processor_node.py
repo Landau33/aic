@@ -29,11 +29,13 @@ from aic_control_interfaces.msg import ControllerState
 def quaternion_to_rotation_matrix(q) -> np.ndarray:
     """q = [x, y, z, w] → 3x3 旋转矩阵（纯 numpy，无额外包）"""
     x, y, z, w = q.x, q.y, q.z, q.w
-    return np.array([
-        [1 - 2*y*y - 2*z*z, 2*x*y - 2*z*w,     2*x*z + 2*y*w],
-        [2*x*y + 2*z*w,     1 - 2*x*x - 2*z*z, 2*y*z - 2*x*w],
-        [2*x*z - 2*y*w,     2*y*z + 2*x*w,     1 - 2*x*x - 2*y*y]
-    ])
+    return np.array(
+        [
+            [1 - 2 * y * y - 2 * z * z, 2 * x * y - 2 * z * w, 2 * x * z + 2 * y * w],
+            [2 * x * y + 2 * z * w, 1 - 2 * x * x - 2 * z * z, 2 * y * z - 2 * x * w],
+            [2 * x * z - 2 * y * w, 2 * y * z + 2 * x * w, 1 - 2 * x * x - 2 * y * y],
+        ]
+    )
 
 
 class WrenchTFProcessorNode(Node):
@@ -43,9 +45,13 @@ class WrenchTFProcessorNode(Node):
         self.declare_parameter("target_frame", "gripper/tcp")
         self.declare_parameter("source_frame", "ati/tool_link")
         self.declare_parameter("raw_wrench_topic", "/fts_broadcaster/wrench")
-        self.declare_parameter("controller_state_topic", "/aic_controller/controller_state")
+        self.declare_parameter(
+            "controller_state_topic", "/aic_controller/controller_state"
+        )
         self.declare_parameter("output_topic", "/nic_insertion/processed_wrench")
-        self.declare_parameter("output_filtered_topic", "/nic_insertion/processed_wrench/filtered")
+        self.declare_parameter(
+            "output_filtered_topic", "/nic_insertion/processed_wrench/filtered"
+        )
         self.declare_parameter("filter_window_sec", 1.0)
         self.declare_parameter("enable_plot", True)
         self.declare_parameter("plot_window_sec", 20.0)
@@ -53,9 +59,13 @@ class WrenchTFProcessorNode(Node):
         self.target_frame = str(self.get_parameter("target_frame").value)
         self.source_frame = str(self.get_parameter("source_frame").value)
         self.raw_wrench_topic = str(self.get_parameter("raw_wrench_topic").value)
-        self.controller_state_topic = str(self.get_parameter("controller_state_topic").value)
+        self.controller_state_topic = str(
+            self.get_parameter("controller_state_topic").value
+        )
         self.output_topic = str(self.get_parameter("output_topic").value)
-        self.output_filtered_topic = str(self.get_parameter("output_filtered_topic").value)
+        self.output_filtered_topic = str(
+            self.get_parameter("output_filtered_topic").value
+        )
         self.filter_window_sec = float(self.get_parameter("filter_window_sec").value)
         self.enable_plot = bool(self.get_parameter("enable_plot").value)
         self.plot_window_sec = float(self.get_parameter("plot_window_sec").value)
@@ -76,7 +86,9 @@ class WrenchTFProcessorNode(Node):
         self.fig = None
 
         self.processed_pub = self.create_publisher(WrenchStamped, self.output_topic, 10)
-        self.filtered_pub = self.create_publisher(WrenchStamped, self.output_filtered_topic, 10)
+        self.filtered_pub = self.create_publisher(
+            WrenchStamped, self.output_filtered_topic, 10
+        )
 
         self.wrench_sub = self.create_subscription(
             WrenchStamped,
@@ -100,7 +112,9 @@ class WrenchTFProcessorNode(Node):
         self.get_logger().info(f"publishing: {self.output_topic}")
         self.get_logger().info(f"publishing: {self.output_filtered_topic}")
         self.get_logger().info(f"plot enabled: {self.enable_plot}")
-        self.get_logger().info("wrench flow: raw -> tare -> tf(target_frame) -> filtered")
+        self.get_logger().info(
+            "wrench flow: raw -> tare -> tf(target_frame) -> filtered"
+        )
 
     def _init_plot(self):
         self.fig, (
@@ -111,16 +125,14 @@ class WrenchTFProcessorNode(Node):
         ) = plt.subplots(4, 1, figsize=(10, 12), sharex=True)
 
         self.lines_force = [
-            self.ax_force.plot([], [], label=label)[0]
-            for label in ("Fx", "Fy", "Fz")
+            self.ax_force.plot([], [], label=label)[0] for label in ("Fx", "Fy", "Fz")
         ]
         self.lines_force_filtered = [
             self.ax_force_filtered.plot([], [], label=f"{label} (filtered)")[0]
             for label in ("Fx", "Fy", "Fz")
         ]
         self.lines_torque = [
-            self.ax_torque.plot([], [], label=label)[0]
-            for label in ("Tx", "Ty", "Tz")
+            self.ax_torque.plot([], [], label=label)[0] for label in ("Tx", "Ty", "Tz")
         ]
         self.lines_torque_filtered = [
             self.ax_torque_filtered.plot([], [], label=f"{label} (filtered)")[0]
@@ -172,7 +184,9 @@ class WrenchTFProcessorNode(Node):
         self.filter_time.append(now_sec)
         self.filter_wrench.append(wrench_vec)
 
-        while self.filter_time and (now_sec - self.filter_time[0] > self.filter_window_sec):
+        while self.filter_time and (
+            now_sec - self.filter_time[0] > self.filter_window_sec
+        ):
             self.filter_time.popleft()
             self.filter_wrench.popleft()
 
@@ -252,28 +266,34 @@ class WrenchTFProcessorNode(Node):
             )
             # 1. 提取 R 和 p
             q = transform.transform.rotation
-            R = quaternion_to_rotation_matrix(q)          # 3x3
-            p = np.array([
-                transform.transform.translation.x,
-                transform.transform.translation.y,
-                transform.transform.translation.z
-            ])
+            R = quaternion_to_rotation_matrix(q)  # 3x3
+            p = np.array(
+                [
+                    transform.transform.translation.x,
+                    transform.transform.translation.y,
+                    transform.transform.translation.z,
+                ]
+            )
 
             # 3. 原始力/力矩（source frame）
-            f_source = np.array([
-                self.current_tared_wrench.wrench.force.x,
-                self.current_tared_wrench.wrench.force.y,
-                self.current_tared_wrench.wrench.force.z
-            ])
-            tau_source = np.array([
-                self.current_tared_wrench.wrench.torque.x,
-                self.current_tared_wrench.wrench.torque.y,
-                self.current_tared_wrench.wrench.torque.z
-            ])
+            f_source = np.array(
+                [
+                    self.current_tared_wrench.wrench.force.x,
+                    self.current_tared_wrench.wrench.force.y,
+                    self.current_tared_wrench.wrench.force.z,
+                ]
+            )
+            tau_source = np.array(
+                [
+                    self.current_tared_wrench.wrench.torque.x,
+                    self.current_tared_wrench.wrench.torque.y,
+                    self.current_tared_wrench.wrench.torque.z,
+                ]
+            )
 
             # 4. 完整 wrench 变换（关键！）
             f_target = R @ f_source
-            tau_target = R @ tau_source + np.cross(p, f_target)   # ← 这就是缺失的 p×F
+            tau_target = R @ tau_source + np.cross(p, f_target)  # ← 这就是缺失的 p×F
 
             raw_wrench = np.concatenate([f_target, tau_target])
         except Exception as exc:
@@ -294,14 +314,16 @@ def main(args=None):
     rclpy.init(args=args)
     node = WrenchTFProcessorNode()
     if not any("use_sim_time:=" in arg for arg in cli_args):
-        node.set_parameters([
-            Parameter("use_sim_time", Parameter.Type.BOOL, True)
-        ])
+        node.set_parameters([Parameter("use_sim_time", Parameter.Type.BOOL, True)])
 
     try:
         if node.enable_plot:
             plt.ion()
-            while rclpy.ok() and node.fig is not None and plt.fignum_exists(node.fig.number):
+            while (
+                rclpy.ok()
+                and node.fig is not None
+                and plt.fignum_exists(node.fig.number)
+            ):
                 rclpy.spin_once(node, timeout_sec=0.05)
                 node.update_plot()
                 plt.pause(0.05)

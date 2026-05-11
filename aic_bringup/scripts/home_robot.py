@@ -68,7 +68,9 @@ class HomeTrajectoryNode(Node):
                 ChangeTargetMode, f"/{self.controller_namespace}/change_target_mode"
             )
             while not self.switch_controller_client.wait_for_service(timeout_sec=1.0):
-                self.get_logger().info("Waiting for /controller_manager/switch_controller...")
+                self.get_logger().info(
+                    "Waiting for /controller_manager/switch_controller..."
+                )
             while not self.reset_joints_client.wait_for_service(timeout_sec=1.0):
                 self.get_logger().info("Waiting for /scoring/reset_joints...")
                 time.sleep(1.0)
@@ -116,7 +118,9 @@ class HomeTrajectoryNode(Node):
         msg = String()
         msg.data = "false"
         self.deep_insert_pub.publish(msg)
-        self.get_logger().info(f"Published deep_insert=false to {self.deep_insert_topic}")
+        self.get_logger().info(
+            f"Published deep_insert=false to {self.deep_insert_topic}"
+        )
 
     def set_cartesian_target_mode(self):
         request = ChangeTargetMode.Request()
@@ -130,7 +134,9 @@ class HomeTrajectoryNode(Node):
         self.reset_deep_insert_trigger()
         if self.use_aic_control:
             if not self.switch_controllers([], [self.controller_namespace]):
-                self.get_logger().error(f"Failed to deactivate {self.controller_namespace}")
+                self.get_logger().error(
+                    f"Failed to deactivate {self.controller_namespace}"
+                )
                 self.timer.cancel()
                 return
 
@@ -147,7 +153,9 @@ class HomeTrajectoryNode(Node):
                 return
 
             if not self.switch_controllers([self.controller_namespace], []):
-                self.get_logger().error(f"Failed to reactivate {self.controller_namespace}")
+                self.get_logger().error(
+                    f"Failed to reactivate {self.controller_namespace}"
+                )
                 self.timer.cancel()
                 return
             if not self.set_cartesian_target_mode():

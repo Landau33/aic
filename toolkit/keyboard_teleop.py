@@ -27,7 +27,11 @@ from enum import Enum
 
 import numpy as np
 import rclpy
-from aic_control_interfaces.msg import MotionUpdate, TargetMode, TrajectoryGenerationMode
+from aic_control_interfaces.msg import (
+    MotionUpdate,
+    TargetMode,
+    TrajectoryGenerationMode,
+)
 from aic_control_interfaces.srv import ChangeTargetMode
 from geometry_msgs.msg import Twist, Vector3, Wrench
 from pynput import keyboard
@@ -63,7 +67,9 @@ TASK_ANGLE_FRAMES = {
     "task3": ("cable_1/sc_tip_link", "task_board/sc_port_0/sc_port_base_link"),
     "trial_3": ("cable_1/sc_tip_link", "task_board/sc_port_1/sc_port_base_link"),
 }
-DEFAULT_ANGLE_SOURCE_FRAME, DEFAULT_ANGLE_TARGET_FRAME = TASK_ANGLE_FRAMES[DEFAULT_TASK_NAME]
+DEFAULT_ANGLE_SOURCE_FRAME, DEFAULT_ANGLE_TARGET_FRAME = TASK_ANGLE_FRAMES[
+    DEFAULT_TASK_NAME
+]
 DEFAULT_ANGLE_EXPECTED_RELATIVE_EULER_DEG = (0.0, 0.0, 0.0)
 
 KEY_MAPPINGS = {
@@ -95,7 +101,9 @@ class SpeedMode(Enum):
 
 def _resolve_task_angle_frames(task_name: str) -> tuple[str, str]:
     task_key = str(task_name).strip().lower().replace("_", "")
-    normalized_frames = {key.replace("_", ""): frames for key, frames in TASK_ANGLE_FRAMES.items()}
+    normalized_frames = {
+        key.replace("_", ""): frames for key, frames in TASK_ANGLE_FRAMES.items()
+    }
     return normalized_frames.get(task_key, TASK_ANGLE_FRAMES[DEFAULT_TASK_NAME])
 
 
@@ -220,7 +228,9 @@ def _rotate_vector_by_quat_xyzw(vector: np.ndarray, quat: np.ndarray) -> np.ndar
     )
 
 
-def _key_to_zero_angle(axis_name: str, angle_deg: float, tolerance_deg: float = 0.05) -> str:
+def _key_to_zero_angle(
+    axis_name: str, angle_deg: float, tolerance_deg: float = 0.05
+) -> str:
     if abs(angle_deg) <= tolerance_deg:
         return "-"
     positive_key, negative_key = ANGLE_ZERO_CORRECTION_KEYS[axis_name]
@@ -234,13 +244,19 @@ class AICKeyboardTeleopNode(Node):
             self.set_parameters([Parameter("use_sim_time", value=True)])
         else:
             self.declare_parameter("use_sim_time", True)
-        self.controller_namespace = self.declare_parameter("controller_namespace", "aic_controller").value
+        self.controller_namespace = self.declare_parameter(
+            "controller_namespace", "aic_controller"
+        ).value
         self.publish_rate = float(self.declare_parameter("publish_rate", 25.0).value)
         self.normal_linear_velocity = float(
-            self.declare_parameter("intervention_linear_velocity", NORMAL_LINEAR_VEL).value
+            self.declare_parameter(
+                "intervention_linear_velocity", NORMAL_LINEAR_VEL
+            ).value
         )
         self.normal_angular_velocity = float(
-            self.declare_parameter("intervention_angular_velocity", NORMAL_ANGULAR_VEL).value
+            self.declare_parameter(
+                "intervention_angular_velocity", NORMAL_ANGULAR_VEL
+            ).value
         )
         self.fast_linear_velocity = float(
             self.declare_parameter("fast_linear_velocity", FAST_LINEAR_VEL).value
@@ -248,10 +264,12 @@ class AICKeyboardTeleopNode(Node):
         self.fast_angular_velocity = float(
             self.declare_parameter("fast_angular_velocity", FAST_ANGULAR_VEL).value
         )
-        self.default_frame_id = self.declare_parameter("default_frame_id", "base_link").value
+        self.default_frame_id = self.declare_parameter(
+            "default_frame_id", "base_link"
+        ).value
         self.task_name = self.declare_parameter("task_name", DEFAULT_TASK_NAME).value
-        default_angle_source_frame, default_angle_target_frame = _resolve_task_angle_frames(
-            self.task_name
+        default_angle_source_frame, default_angle_target_frame = (
+            _resolve_task_angle_frames(self.task_name)
         )
         self.angle_source_frame = self.declare_parameter(
             "angle_source_frame",
@@ -265,7 +283,9 @@ class AICKeyboardTeleopNode(Node):
             self.declare_parameter("angle_print_period_sec", 0.5).value
         )
         self.auto_align_angular_gain = float(
-            self.declare_parameter("auto_align_angular_gain", AUTO_ALIGN_ANGULAR_GAIN).value
+            self.declare_parameter(
+                "auto_align_angular_gain", AUTO_ALIGN_ANGULAR_GAIN
+            ).value
         )
         self.auto_align_max_angular_velocity = float(
             self.declare_parameter(
@@ -274,7 +294,9 @@ class AICKeyboardTeleopNode(Node):
             ).value
         )
         self.auto_align_tolerance_deg = float(
-            self.declare_parameter("auto_align_tolerance_deg", AUTO_ALIGN_TOLERANCE_DEG).value
+            self.declare_parameter(
+                "auto_align_tolerance_deg", AUTO_ALIGN_TOLERANCE_DEG
+            ).value
         )
         self.random_align_max_deg = float(
             self.declare_parameter("random_align_max_deg", RANDOM_ALIGN_MAX_DEG).value
@@ -295,7 +317,9 @@ class AICKeyboardTeleopNode(Node):
             self.declare_parameter("auto_move_xy_max", AUTO_MOVE_XY_MAX).value
         )
         self.auto_move_w_side_offset = float(
-            self.declare_parameter("auto_move_w_side_offset", AUTO_MOVE_W_SIDE_OFFSET).value
+            self.declare_parameter(
+                "auto_move_w_side_offset", AUTO_MOVE_W_SIDE_OFFSET
+            ).value
         )
         self.auto_move_linear_gain = float(
             self.declare_parameter("auto_move_linear_gain", AUTO_MOVE_LINEAR_GAIN).value
@@ -459,9 +483,7 @@ class AICKeyboardTeleopNode(Node):
                 timeout=Duration(seconds=0.5),
             )
         except TransformException as exc:
-            self.get_logger().warning(
-                f"Auto move above: target TF unavailable ({exc})"
-            )
+            self.get_logger().warning(f"Auto move above: target TF unavailable ({exc})")
             return
 
         target_pos = np.array(
@@ -492,7 +514,9 @@ class AICKeyboardTeleopNode(Node):
             dtype=np.float64,
         )
         self._auto_move_waypoints_in_base = [waypoint_w_side, target_above_random]
-        self._auto_move_target_position_in_base = self._auto_move_waypoints_in_base[0].copy()
+        self._auto_move_target_position_in_base = self._auto_move_waypoints_in_base[
+            0
+        ].copy()
         self.auto_move_active = True
         self.get_logger().info(
             "Auto move random path: enabled "
@@ -544,7 +568,9 @@ class AICKeyboardTeleopNode(Node):
             self.random_align_max_deg,
             size=3,
         )
-        self._random_align_target_quaternion = _euler_xyz_degrees_to_quat_xyzw(sampled_euler_deg)
+        self._random_align_target_quaternion = _euler_xyz_degrees_to_quat_xyzw(
+            sampled_euler_deg
+        )
         self.auto_align_active = True
         self.get_logger().info(
             "Random angle align: enabled target="
@@ -570,7 +596,9 @@ class AICKeyboardTeleopNode(Node):
         if response is None or not response.success:
             return
 
-    def generate_velocity_motion_update(self, twist: Twist, frame_id: str) -> MotionUpdate:
+    def generate_velocity_motion_update(
+        self, twist: Twist, frame_id: str
+    ) -> MotionUpdate:
         msg = MotionUpdate()
         msg.header.stamp = self.get_clock().now().to_msg()
         msg.header.frame_id = frame_id
@@ -623,8 +651,12 @@ class AICKeyboardTeleopNode(Node):
             for key in self.active_keys:
                 if key in KEY_MAPPINGS:
                     vals = KEY_MAPPINGS[key]
-                    input_twist[0:3] += np.array(vals[0:3], dtype=np.float64) * self.linear_vel
-                    angular_twist_local += np.array(vals[3:6], dtype=np.float64) * self.angular_vel
+                    input_twist[0:3] += (
+                        np.array(vals[0:3], dtype=np.float64) * self.linear_vel
+                    )
+                    angular_twist_local += (
+                        np.array(vals[3:6], dtype=np.float64) * self.angular_vel
+                    )
             if np.linalg.norm(angular_twist_local) > 0.0:
                 angular_frame_quat = self._lookup_frame_quaternion_in_base(
                     self.angular_control_frame
@@ -647,7 +679,9 @@ class AICKeyboardTeleopNode(Node):
         twist.angular.y = float(input_twist[4])
         twist.angular.z = float(input_twist[5])
 
-        self.motion_pub.publish(self.generate_velocity_motion_update(twist, publish_frame_id))
+        self.motion_pub.publish(
+            self.generate_velocity_motion_update(twist, publish_frame_id)
+        )
 
         self._maybe_log_current_angle()
 
@@ -691,7 +725,11 @@ class AICKeyboardTeleopNode(Node):
         euler_deg = _quat_xyzw_to_euler_xyz_degrees(relative_quaternion)
         if np.max(np.abs(euler_deg)) <= self.auto_align_tolerance_deg:
             self.auto_align_active = False
-            mode_label = "Random angle align" if self._random_align_target_quaternion is not None else "Auto angle align"
+            mode_label = (
+                "Random angle align"
+                if self._random_align_target_quaternion is not None
+                else "Auto angle align"
+            )
             self._random_align_target_quaternion = None
             self.get_logger().info(
                 f"{mode_label}: reached "
@@ -745,7 +783,9 @@ class AICKeyboardTeleopNode(Node):
             if self._auto_move_waypoints_in_base:
                 self._auto_move_waypoints_in_base.pop(0)
             if self._auto_move_waypoints_in_base:
-                self._auto_move_target_position_in_base = self._auto_move_waypoints_in_base[0].copy()
+                self._auto_move_target_position_in_base = (
+                    self._auto_move_waypoints_in_base[0].copy()
+                )
                 self.get_logger().info(
                     "Auto move path: next waypoint "
                     f"[{self._auto_move_target_position_in_base[0]:.4f}, "
@@ -796,7 +836,9 @@ class AICKeyboardTeleopNode(Node):
     def cleanup(self):
         if rclpy.ok():
             zero_twist = Twist()
-            self.motion_pub.publish(self.generate_velocity_motion_update(zero_twist, self.frame_id))
+            self.motion_pub.publish(
+                self.generate_velocity_motion_update(zero_twist, self.frame_id)
+            )
         self.keyboard_listener.stop()
 
 
