@@ -13,6 +13,10 @@ Keys:
 - `n`: toggle tcp / base frame
 - `m`: toggle normal / fast speed
 - `z`: toggle auto-align angle to [0, 0, 0]
+- `x`: toggle auto-align to a random target with each axis in [-2, 2] deg
+- `c`: toggle auto-move to a random point above the target via its W-side waypoint
+- `r`: publish a zero twist once, then exit
+- `t`: toggle pause (stop publishing; release all held keys and auto modes)
 - `esc`: exit
 """
 
@@ -31,6 +35,7 @@ from rclpy.duration import Duration
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.parameter import Parameter
+from std_msgs.msg import String as StdString
 from tf2_ros import Buffer, TransformException, TransformListener
 
 NORMAL_LINEAR_VEL = 0.01
@@ -40,13 +45,22 @@ FAST_ANGULAR_VEL = 0.18
 AUTO_ALIGN_ANGULAR_GAIN = 1.2
 AUTO_ALIGN_MAX_ANGULAR_VEL = 0.1
 AUTO_ALIGN_TOLERANCE_DEG = 0.5
+RANDOM_ALIGN_MAX_DEG = 2.0
+AUTO_MOVE_ABOVE_HEIGHT_MIN = 0.038
+AUTO_MOVE_ABOVE_HEIGHT_MAX = 0.040
+AUTO_MOVE_XY_MAX = 0.003
+AUTO_MOVE_W_SIDE_OFFSET = 0.2
+AUTO_MOVE_LINEAR_GAIN = 1.5
+AUTO_MOVE_MAX_LINEAR_VEL = 0.05
+AUTO_MOVE_TOLERANCE_M = 0.002
+AUTO_MOVE_TCP_FRAME = "gripper/tcp"
 DEFAULT_TASK_NAME = "task3"
 TASK_ANGLE_FRAMES = {
     "task1": ("cable_0/sfp_tip_link", "task_board/nic_card_mount_0/sfp_port_0_link"),
     "trial_1": ("cable_0/sfp_tip_link", "task_board/nic_card_mount_0/sfp_port_0_link"),
     "task2": ("cable_0/sfp_tip_link", "task_board/nic_card_mount_1/sfp_port_0_link"),
     "trial_2": ("cable_0/sfp_tip_link", "task_board/nic_card_mount_1/sfp_port_0_link"),
-    "task3": ("cable_1/sc_tip_link", "task_board/sc_port_1/sc_port_base_link"),
+    "task3": ("cable_1/sc_tip_link", "task_board/sc_port_0/sc_port_base_link"),
     "trial_3": ("cable_1/sc_tip_link", "task_board/sc_port_1/sc_port_base_link"),
 }
 DEFAULT_ANGLE_SOURCE_FRAME, DEFAULT_ANGLE_TARGET_FRAME = TASK_ANGLE_FRAMES[DEFAULT_TASK_NAME]
@@ -61,10 +75,16 @@ KEY_MAPPINGS = {
     "k": (0, 0, 1, 0, 0, 0),
     "q": (0, 0, 0, 1, 0, 0),
     "e": (0, 0, 0, -1, 0, 0),
-    "u": (0, 0, 0, 0, -1, 0),
-    "i": (0, 0, 0, 0, 1, 0),
-    "o": (0, 0, 0, 0, 0, 1),
-    "p": (0, 0, 0, 0, 0, -1),
+    "u": (0, 0, 0, 0, 1, 0),
+    "i": (0, 0, 0, 0, -1, 0),
+    "o": (0, 0, 0, 0, 0, -1),
+    "p": (0, 0, 0, 0, 0, 1),
+}
+
+ANGLE_ZERO_CORRECTION_KEYS = {
+    "x": ("e", "q"),
+    "y": ("u", "i"),
+    "z": ("p", "o"),
 }
 
 
@@ -200,6 +220,13 @@ def _rotate_vector_by_quat_xyzw(vector: np.ndarray, quat: np.ndarray) -> np.ndar
     )
 
 
+def _key_to_zero_angle(axis_name: str, angle_deg: float, tolerance_deg: float = 0.05) -> str:
+    if abs(angle_deg) <= tolerance_deg:
+        return "-"
+    positive_key, negative_key = ANGLE_ZERO_CORRECTION_KEYS[axis_name]
+    return positive_key if angle_deg > 0.0 else negative_key
+
+
 class AICKeyboardTeleopNode(Node):
     def __init__(self):
         super().__init__("aic_keyboard_teleop")
@@ -249,6 +276,55 @@ class AICKeyboardTeleopNode(Node):
         self.auto_align_tolerance_deg = float(
             self.declare_parameter("auto_align_tolerance_deg", AUTO_ALIGN_TOLERANCE_DEG).value
         )
+        self.random_align_max_deg = float(
+            self.declare_parameter("random_align_max_deg", RANDOM_ALIGN_MAX_DEG).value
+        )
+        self.auto_move_above_height_min = float(
+            self.declare_parameter(
+                "auto_move_above_height_min",
+                AUTO_MOVE_ABOVE_HEIGHT_MIN,
+            ).value
+        )
+        self.auto_move_above_height_max = float(
+            self.declare_parameter(
+                "auto_move_above_height_max",
+                AUTO_MOVE_ABOVE_HEIGHT_MAX,
+            ).value
+        )
+        self.auto_move_xy_max = float(
+            self.declare_parameter("auto_move_xy_max", AUTO_MOVE_XY_MAX).value
+        )
+        self.auto_move_w_side_offset = float(
+            self.declare_parameter("auto_move_w_side_offset", AUTO_MOVE_W_SIDE_OFFSET).value
+        )
+        self.auto_move_linear_gain = float(
+            self.declare_parameter("auto_move_linear_gain", AUTO_MOVE_LINEAR_GAIN).value
+        )
+        self.auto_move_max_linear_velocity = float(
+            self.declare_parameter(
+                "auto_move_max_linear_velocity",
+                AUTO_MOVE_MAX_LINEAR_VEL,
+            ).value
+        )
+        self.auto_move_tolerance_m = float(
+            self.declare_parameter("auto_move_tolerance_m", AUTO_MOVE_TOLERANCE_M).value
+        )
+        self.angular_control_frame = self.declare_parameter(
+            "angular_control_frame",
+            "gripper/tcp",
+        ).value
+        self.auto_move_tcp_frame = self.declare_parameter(
+            "auto_move_tcp_frame", AUTO_MOVE_TCP_FRAME
+        ).value
+        self.insertion_event_topic = self.declare_parameter(
+            "insertion_event_topic",
+            "/scoring/insertion_event",
+        ).value
+        self._random_align_target_quaternion: np.ndarray | None = None
+        self._auto_move_target_position_in_base: np.ndarray | None = None
+        self._auto_move_waypoints_in_base: list[np.ndarray] = []
+        self.auto_move_active = False
+        self._random_rng = np.random.default_rng()
 
         self.motion_pub = self.create_publisher(
             MotionUpdate,
@@ -259,8 +335,15 @@ class AICKeyboardTeleopNode(Node):
             ChangeTargetMode,
             f"/{self.controller_namespace}/change_target_mode",
         )
+        self.insertion_event_sub = self.create_subscription(
+            StdString,
+            self.insertion_event_topic,
+            self._on_insertion_event,
+            10,
+        )
 
         self.active_keys = set()
+        self.paused = False
         self.speed_mode = SpeedMode.NORMAL
         self.linear_vel = self.normal_linear_velocity
         self.angular_vel = self.normal_angular_velocity
@@ -290,6 +373,13 @@ class AICKeyboardTeleopNode(Node):
         )
         self.timer = self.create_timer(1.0 / self.publish_rate, self.send_references)
 
+    def _on_insertion_event(self, msg: StdString):
+        port = str(msg.data).strip()
+        if port:
+            self.get_logger().info(f"Insertion complete: port={port}")
+        else:
+            self.get_logger().info("Insertion complete")
+
     def on_key_press(self, key):
         try:
             if hasattr(key, "char") and key.char is not None:
@@ -301,6 +391,15 @@ class AICKeyboardTeleopNode(Node):
                         self._toggle_frame_id()
                     elif char == "z":
                         self._toggle_auto_align()
+                    elif char == "x":
+                        self._toggle_random_align()
+                    elif char == "c":
+                        self._toggle_move_above_random()
+                    elif char == "r":
+                        self._stop_and_exit()
+                        return
+                    elif char == "t":
+                        self._toggle_pause()
                 self.active_keys.add(char)
         except AttributeError:
             return
@@ -338,10 +437,119 @@ class AICKeyboardTeleopNode(Node):
 
     def _toggle_auto_align(self):
         self.auto_align_active = not self.auto_align_active
+        self._random_align_target_quaternion = None
         if self.auto_align_active:
             self.get_logger().info("Auto angle align: enabled")
         else:
             self.get_logger().info("Auto angle align: disabled")
+
+    def _toggle_move_above_random(self):
+        if self.auto_move_active:
+            self.auto_move_active = False
+            self._auto_move_target_position_in_base = None
+            self._auto_move_waypoints_in_base = []
+            self.get_logger().info("Auto move path: disabled")
+            return
+
+        try:
+            target_in_base_tf = self._tf_buffer.lookup_transform(
+                "base_link",
+                self.angle_target_frame,
+                rclpy.time.Time(),
+                timeout=Duration(seconds=0.5),
+            )
+        except TransformException as exc:
+            self.get_logger().warning(
+                f"Auto move above: target TF unavailable ({exc})"
+            )
+            return
+
+        target_pos = np.array(
+            [
+                target_in_base_tf.transform.translation.x,
+                target_in_base_tf.transform.translation.y,
+                target_in_base_tf.transform.translation.z,
+            ],
+            dtype=np.float64,
+        )
+        sampled_xy_offset = self._random_rng.uniform(
+            -self.auto_move_xy_max,
+            self.auto_move_xy_max,
+            size=2,
+        )
+        sampled_above_height = float(
+            self._random_rng.uniform(
+                self.auto_move_above_height_min,
+                self.auto_move_above_height_max,
+            )
+        )
+        target_above_random = target_pos + np.array(
+            [sampled_xy_offset[0], sampled_xy_offset[1], sampled_above_height],
+            dtype=np.float64,
+        )
+        waypoint_w_side = target_above_random + np.array(
+            [0.0, -self.auto_move_w_side_offset, 0.0],
+            dtype=np.float64,
+        )
+        self._auto_move_waypoints_in_base = [waypoint_w_side, target_above_random]
+        self._auto_move_target_position_in_base = self._auto_move_waypoints_in_base[0].copy()
+        self.auto_move_active = True
+        self.get_logger().info(
+            "Auto move random path: enabled "
+            f"offset=[{sampled_xy_offset[0]:.4f}, {sampled_xy_offset[1]:.4f}] "
+            f"above_height={sampled_above_height:.4f} "
+            f"waypoint=[{waypoint_w_side[0]:.4f}, {waypoint_w_side[1]:.4f}, {waypoint_w_side[2]:.4f}] "
+            f"target=[{target_above_random[0]:.4f}, {target_above_random[1]:.4f}, {target_above_random[2]:.4f}]"
+        )
+
+    def _toggle_pause(self):
+        self.paused = not self.paused
+        if self.paused:
+            self.active_keys.clear()
+            self.auto_align_active = False
+            self.auto_move_active = False
+            self._random_align_target_quaternion = None
+            self._auto_move_target_position_in_base = None
+            self._auto_move_waypoints_in_base = []
+            zero_twist = Twist()
+            self.motion_pub.publish(
+                self.generate_velocity_motion_update(zero_twist, self.frame_id)
+            )
+            self.get_logger().info("Keyboard teleop: PAUSED (press 't' to resume)")
+        else:
+            self.get_logger().info("Keyboard teleop: RESUMED")
+
+    def _stop_and_exit(self):
+        self.active_keys.clear()
+        self.auto_align_active = False
+        self.auto_move_active = False
+        self._random_align_target_quaternion = None
+        self._auto_move_target_position_in_base = None
+        self._auto_move_waypoints_in_base = []
+        zero_twist = Twist()
+        self.motion_pub.publish(
+            self.generate_velocity_motion_update(zero_twist, self.frame_id)
+        )
+        self.get_logger().info("Keyboard teleop: sent zero twist and exiting")
+        rclpy.shutdown()
+
+    def _toggle_random_align(self):
+        if self.auto_align_active and self._random_align_target_quaternion is not None:
+            self.auto_align_active = False
+            self._random_align_target_quaternion = None
+            self.get_logger().info("Random angle align: disabled")
+            return
+        sampled_euler_deg = self._random_rng.uniform(
+            -self.random_align_max_deg,
+            self.random_align_max_deg,
+            size=3,
+        )
+        self._random_align_target_quaternion = _euler_xyz_degrees_to_quat_xyzw(sampled_euler_deg)
+        self.auto_align_active = True
+        self.get_logger().info(
+            "Random angle align: enabled target="
+            f"[{sampled_euler_deg[0]:.2f}, {sampled_euler_deg[1]:.2f}, {sampled_euler_deg[2]:.2f}] deg"
+        )
 
     def _ensure_motion_subscriber_ready(self) -> bool:
         if self.motion_subscriber_ready:
@@ -377,24 +585,59 @@ class AICKeyboardTeleopNode(Node):
         msg.trajectory_generation_mode.mode = TrajectoryGenerationMode.MODE_VELOCITY
         return msg
 
+    def _lookup_frame_quaternion_in_base(self, frame_name: str) -> np.ndarray | None:
+        try:
+            frame_in_base_tf = self._tf_buffer.lookup_transform(
+                "base_link",
+                frame_name,
+                rclpy.time.Time(),
+                timeout=Duration(seconds=0.05),
+            )
+        except TransformException:
+            return None
+        return _quaternion_from_transform(frame_in_base_tf).astype(np.float64)
+
     def send_references(self):
         if not self._ensure_motion_subscriber_ready():
             return
 
-        input_twist = np.zeros(6, dtype=np.float64)
-        publish_frame_id = self.frame_id
+        if self.paused:
+            self._maybe_log_current_angle()
+            return
 
-        if self.auto_align_active:
-            auto_angular = self._compute_auto_align_angular_velocity()
-            if auto_angular is not None:
-                input_twist[3:6] = auto_angular
-                publish_frame_id = "base_link"
+        input_twist = np.zeros(6, dtype=np.float64)
+        publish_frame_id = "base_link"
+
+        if self.auto_align_active or self.auto_move_active:
+            if self.auto_align_active:
+                auto_angular = self._compute_auto_align_angular_velocity()
+                if auto_angular is not None:
+                    input_twist[3:6] = auto_angular
+            if self.auto_move_active:
+                auto_linear = self._compute_auto_move_linear_velocity()
+                if auto_linear is not None:
+                    input_twist[0:3] = auto_linear
+            publish_frame_id = "base_link"
         else:
+            angular_twist_local = np.zeros(3, dtype=np.float64)
             for key in self.active_keys:
                 if key in KEY_MAPPINGS:
                     vals = KEY_MAPPINGS[key]
                     input_twist[0:3] += np.array(vals[0:3], dtype=np.float64) * self.linear_vel
-                    input_twist[3:6] += np.array(vals[3:6], dtype=np.float64) * self.angular_vel
+                    angular_twist_local += np.array(vals[3:6], dtype=np.float64) * self.angular_vel
+            if np.linalg.norm(angular_twist_local) > 0.0:
+                angular_frame_quat = self._lookup_frame_quaternion_in_base(
+                    self.angular_control_frame
+                )
+                if angular_frame_quat is None:
+                    self.get_logger().warning(
+                        f"Angular control frame unavailable: {self.angular_control_frame}"
+                    )
+                else:
+                    input_twist[3:6] = _rotate_vector_by_quat_xyzw(
+                        angular_twist_local,
+                        angular_frame_quat,
+                    )
 
         twist = Twist()
         twist.linear.x = float(input_twist[0])
@@ -425,7 +668,20 @@ class AICKeyboardTeleopNode(Node):
                 _quat_inverse_xyzw(self._expected_relative_quaternion),
                 relative_quaternion,
             )
+        if self._random_align_target_quaternion is not None:
+            relative_quaternion = _quat_multiply_xyzw(
+                _quat_inverse_xyzw(self._random_align_target_quaternion),
+                relative_quaternion,
+            )
         return relative_quaternion
+
+    def _lookup_tip_frame_correction_rotvec_deg(self) -> np.ndarray | None:
+        relative_quaternion = self._lookup_angle_error_quaternion()
+        if relative_quaternion is None:
+            return None
+        correction_in_source = _quat_inverse_xyzw(relative_quaternion)
+        rotvec_rad = _quat_xyzw_to_rotvec(correction_in_source)
+        return np.degrees(rotvec_rad).astype(np.float32)
 
     def _compute_auto_align_angular_velocity(self) -> np.ndarray | None:
         relative_quaternion = self._lookup_angle_error_quaternion()
@@ -435,8 +691,10 @@ class AICKeyboardTeleopNode(Node):
         euler_deg = _quat_xyzw_to_euler_xyz_degrees(relative_quaternion)
         if np.max(np.abs(euler_deg)) <= self.auto_align_tolerance_deg:
             self.auto_align_active = False
+            mode_label = "Random angle align" if self._random_align_target_quaternion is not None else "Auto angle align"
+            self._random_align_target_quaternion = None
             self.get_logger().info(
-                "Auto angle align: reached "
+                f"{mode_label}: reached "
                 f"[{euler_deg[0]:.2f}, {euler_deg[1]:.2f}, {euler_deg[2]:.2f}] deg"
             )
             return np.zeros(3, dtype=np.float64)
@@ -461,21 +719,78 @@ class AICKeyboardTeleopNode(Node):
         target_to_base_quat = _quaternion_from_transform(target_in_base_tf)
         return _rotate_vector_by_quat_xyzw(correction_target, target_to_base_quat)
 
+    def _compute_auto_move_linear_velocity(self) -> np.ndarray | None:
+        if self._auto_move_target_position_in_base is None:
+            return None
+        try:
+            tcp_in_base_tf = self._tf_buffer.lookup_transform(
+                "base_link",
+                self.auto_move_tcp_frame,
+                rclpy.time.Time(),
+                timeout=Duration(seconds=0.05),
+            )
+        except TransformException:
+            return None
+        tcp_pos = np.array(
+            [
+                tcp_in_base_tf.transform.translation.x,
+                tcp_in_base_tf.transform.translation.y,
+                tcp_in_base_tf.transform.translation.z,
+            ],
+            dtype=np.float64,
+        )
+        error = self._auto_move_target_position_in_base - tcp_pos
+        distance = float(np.linalg.norm(error))
+        if distance <= self.auto_move_tolerance_m:
+            if self._auto_move_waypoints_in_base:
+                self._auto_move_waypoints_in_base.pop(0)
+            if self._auto_move_waypoints_in_base:
+                self._auto_move_target_position_in_base = self._auto_move_waypoints_in_base[0].copy()
+                self.get_logger().info(
+                    "Auto move path: next waypoint "
+                    f"[{self._auto_move_target_position_in_base[0]:.4f}, "
+                    f"{self._auto_move_target_position_in_base[1]:.4f}, "
+                    f"{self._auto_move_target_position_in_base[2]:.4f}]"
+                )
+            else:
+                self.auto_move_active = False
+                self._auto_move_target_position_in_base = None
+                self.get_logger().info(
+                    f"Auto move path: reached final target (dist={distance * 1000.0:.2f} mm)"
+                )
+            return np.zeros(3, dtype=np.float64)
+        velocity = self.auto_move_linear_gain * error
+        speed = float(np.linalg.norm(velocity))
+        if speed > self.auto_move_max_linear_velocity:
+            velocity *= self.auto_move_max_linear_velocity / speed
+        return velocity
+
     def _maybe_log_current_angle(self):
         now = time.monotonic()
         if now - self.last_angle_log_time < self.angle_print_period_sec:
             return
         self.last_angle_log_time = now
 
-        relative_quaternion = self._lookup_angle_error_quaternion()
-        if relative_quaternion is None:
+        tip_correction_deg = self._lookup_tip_frame_correction_rotvec_deg()
+        if tip_correction_deg is None:
             return
 
-        euler_deg = _quat_xyzw_to_euler_xyz_degrees(
-            relative_quaternion,
-        ).astype(np.float32)
+        display_deg = np.array(
+            [
+                tip_correction_deg[1],
+                tip_correction_deg[0],
+                tip_correction_deg[2],
+            ],
+            dtype=np.float32,
+        )
+        zero_keys = {
+            "first": _key_to_zero_angle("x", float(display_deg[0])),
+            "second": _key_to_zero_angle("y", float(display_deg[1])),
+            "third": _key_to_zero_angle("z", float(display_deg[2])),
+        }
         self.get_logger().info(
-            f"[{euler_deg[0]:.2f}, {euler_deg[1]:.2f}, {euler_deg[2]:.2f}]"
+            f"[{display_deg[0]:.2f}, {display_deg[1]:.2f}, {display_deg[2]:.2f}] "
+            f"[{zero_keys['first']}, {zero_keys['second']}, {zero_keys['third']}]"
         )
 
     def cleanup(self):
