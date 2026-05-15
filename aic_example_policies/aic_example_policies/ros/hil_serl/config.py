@@ -54,6 +54,10 @@ class HilSerlTopicConfig:
     left_image_roi_topic: str = "observations_roi/left_image"
     center_image_roi_topic: str = "observations_roi/center_image"
     right_image_roi_topic: str = "observations_roi/right_image"
+    observation_masked_roi_topic: str = "observations_masked_roi"
+    left_image_masked_roi_topic: str = "observations_masked_roi/left_image"
+    center_image_masked_roi_topic: str = "observations_masked_roi/center_image"
+    right_image_masked_roi_topic: str = "observations_masked_roi/right_image"
 
 
 @dataclass(frozen=True)
