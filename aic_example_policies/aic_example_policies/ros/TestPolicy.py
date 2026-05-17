@@ -65,6 +65,7 @@ class TestPolicy(Policy):
             Image, self._config.topics.right_image_roi_topic, 10
         )
         self._masked_roi_pub = MaskedRoiPublisher(parent_node, self._config.topics)
+        self._masked_roi_pub.start()
         self._observation_sub = parent_node.create_subscription(
             Observation,
             "observations",
@@ -81,7 +82,6 @@ class TestPolicy(Policy):
         self._background_roi_publish_period_sec = 0.1
         self._last_logged_roi_params = {}
         self._declare_live_roi_parameters()
-        self._declare_masked_roi_parameters()
 
         self._deep_insert = False
         self._deepinsert_event_sub = parent_node.create_subscription(
@@ -112,18 +112,9 @@ class TestPolicy(Policy):
                 float(roi.offset_y),
             )
 
-    def _declare_masked_roi_parameters(self) -> None:
-        self._declare_parameter_if_needed("hil_serl.masked_roi.enabled", False)
-
     def _declare_parameter_if_needed(self, name: str, value) -> None:
         if not self._parent_node.has_parameter(name):
             self._parent_node.declare_parameter(name, value)
-
-    def _masked_roi_enabled(self) -> bool:
-        value = self._parent_node.get_parameter("hil_serl.masked_roi.enabled").value
-        if isinstance(value, str):
-            return value.strip().lower() == "true"
-        return bool(value)
 
     def _on_deepinsert_event(self, msg: String) -> None:
         self._deep_insert = msg.data.strip().lower() == "true"
@@ -190,8 +181,7 @@ class TestPolicy(Policy):
         self._left_image_roi_pub.publish(roi_msg.left_image)
         self._center_image_roi_pub.publish(roi_msg.center_image)
         self._right_image_roi_pub.publish(roi_msg.right_image)
-        if self._masked_roi_enabled():
-            self._masked_roi_pub.publish_observation(roi_msg)
+        self._masked_roi_pub.publish_observation(roi_msg)
         self._roi_publish_count += 1
         if self._roi_publish_count % 20 == 1:
             self.get_logger().info(

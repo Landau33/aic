@@ -14,7 +14,7 @@
 #  limitations under the License.
 #
 
-"""Publish blue-object masked ROI images for AIC observations."""
+"""Publish blue + fixed-plug-region masked ROI images for AIC observations."""
 
 from __future__ import annotations
 
@@ -37,78 +37,138 @@ class MaskedRoiParams:
     background_value: int
 
 
-class MaskedRoiPublisher:
-    """Build and publish two-channel masked ROI images.
+@dataclass(frozen=True)
+class PlugBbox:
+    """Fixed plug rectangle in image pixel coordinates (inclusive-exclusive)."""
 
-    Channel 0 is grayscale from the source image inside the blue HSV mask and
-    ``background_value`` outside the mask. Channel 1 is the binary blue mask
-    encoded as 1 for mask pixels and 0 elsewhere.
+    x_min: int
+    y_min: int
+    x_max: int
+    y_max: int
+
+    def is_empty(self) -> bool:
+        return self.x_max <= self.x_min or self.y_max <= self.y_min
+
+
+class MaskedRoiPublisher:
+    """Build and publish masked ROI images plus RViz-friendly mono8 views.
+
+    The 8UC2 masked output (channel 0 grayscale inside the blue-HSV mask
+    unioned with a fixed plug rectangle, ``background_value`` elsewhere;
+    channel 1 the 0/1 binary mask) feeds the policy. Always-on mono8 gray
+    and mask topics under ``vis_prefix`` mirror the same content for RViz.
     """
+
+    VIS_PREFIX = "observations_masked_roi_vis"
 
     def __init__(self, parent_node, topics) -> None:
         self._parent_node = parent_node
         self._topics = topics
-        self._observation_pub = parent_node.create_publisher(
-            Observation,
-            topics.observation_masked_roi_topic,
-            10,
-        )
-        self._left_image_pub = parent_node.create_publisher(
-            Image,
-            topics.left_image_masked_roi_topic,
-            10,
-        )
-        self._center_image_pub = parent_node.create_publisher(
-            Image,
-            topics.center_image_masked_roi_topic,
-            10,
-        )
-        self._right_image_pub = parent_node.create_publisher(
-            Image,
-            topics.right_image_masked_roi_topic,
-            10,
-        )
+        self._started = False
+        self._observation_pub = None
+        self._image_pubs: dict[str, object] = {}
+        self._vis_gray_pubs: dict[str, object] = {}
+        self._vis_mask_pubs: dict[str, object] = {}
         self._publish_count = 0
         self._declare_parameters()
 
+    def start(self) -> None:
+        """Create all publishers. Idempotent; call once from the owner."""
+        if self._started:
+            return
+        topics = self._topics
+        self._observation_pub = self._parent_node.create_publisher(
+            Observation, topics.observation_masked_roi_topic, 10
+        )
+        self._image_pubs = {
+            "left": self._parent_node.create_publisher(
+                Image, topics.left_image_masked_roi_topic, 10
+            ),
+            "center": self._parent_node.create_publisher(
+                Image, topics.center_image_masked_roi_topic, 10
+            ),
+            "right": self._parent_node.create_publisher(
+                Image, topics.right_image_masked_roi_topic, 10
+            ),
+        }
+        for name in ("left", "center", "right"):
+            self._vis_gray_pubs[name] = self._parent_node.create_publisher(
+                Image, f"{self.VIS_PREFIX}/{name}/gray", 10
+            )
+            self._vis_mask_pubs[name] = self._parent_node.create_publisher(
+                Image, f"{self.VIS_PREFIX}/{name}/mask", 10
+            )
+        self._started = True
+        self._parent_node.get_logger().info(
+            f"MaskedRoiPublisher started; vis under {self.VIS_PREFIX}/<cam>/{{gray,mask}}"
+        )
+
     def _declare_parameters(self) -> None:
+        self._declare_parameter_if_needed("hil_serl.masked_roi.enabled", False)
         self._declare_parameter_if_needed("hil_serl.masked_roi.hue_min", 90)
         self._declare_parameter_if_needed("hil_serl.masked_roi.hue_max", 130)
         self._declare_parameter_if_needed("hil_serl.masked_roi.saturation_min", 50)
         self._declare_parameter_if_needed("hil_serl.masked_roi.value_min", 50)
         self._declare_parameter_if_needed("hil_serl.masked_roi.background_value", 0)
+        self._declare_parameter_if_needed(
+            "hil_serl.masked_roi.plug_bbox.left", [110, 175, 245, 300]
+        )
+        self._declare_parameter_if_needed(
+            "hil_serl.masked_roi.plug_bbox.center", [10, 255, 165, 400]
+        )
+        self._declare_parameter_if_needed(
+            "hil_serl.masked_roi.plug_bbox.right", [45, 180, 190, 300]
+        )
+
+    def is_enabled(self) -> bool:
+        value = self._parent_node.get_parameter("hil_serl.masked_roi.enabled").value
+        if isinstance(value, str):
+            return value.strip().lower() == "true"
+        return bool(value)
 
     def _declare_parameter_if_needed(self, name: str, value) -> None:
         if not self._parent_node.has_parameter(name):
             self._parent_node.declare_parameter(name, value)
 
     def publish_observation(self, roi_msg: Observation) -> Observation | None:
-        """Publish a masked copy of an already-cropped ROI observation."""
+        """Build masks once; always publish mono8 vis, 8UC2 only when enabled."""
+        if not self._started:
+            return None
         try:
             params = self._params()
-            masked_msg = Observation()
-            masked_msg.controller_state = roi_msg.controller_state
-            masked_msg.wrist_wrench = roi_msg.wrist_wrench
-            masked_msg.joint_states = roi_msg.joint_states
-            masked_msg.left_camera_info = roi_msg.left_camera_info
-            masked_msg.center_camera_info = roi_msg.center_camera_info
-            masked_msg.right_camera_info = roi_msg.right_camera_info
-            masked_msg.left_image = build_masked_roi_image(roi_msg.left_image, params)
-            masked_msg.center_image = build_masked_roi_image(
-                roi_msg.center_image,
-                params,
-            )
-            masked_msg.right_image = build_masked_roi_image(roi_msg.right_image, params)
+            plug_bboxes = self._plug_bboxes()
+            built = {
+                name: _build_masked_outputs(getattr(roi_msg, f"{name}_image"), params, plug_bboxes[name])
+                for name in ("left", "center", "right")
+            }
         except Exception as exc:
             self._parent_node.get_logger().warn(
                 f"Failed to build observations_masked_roi: {exc}"
             )
             return None
 
+        for name, (image_msg, _, gray_msg, mask_msg) in built.items():
+            self._vis_gray_pubs[name].publish(gray_msg)
+            self._vis_mask_pubs[name].publish(mask_msg)
+
+        if not self.is_enabled():
+            return None
+
+        masked_msg = Observation()
+        masked_msg.controller_state = roi_msg.controller_state
+        masked_msg.wrist_wrench = roi_msg.wrist_wrench
+        masked_msg.joint_states = roi_msg.joint_states
+        masked_msg.left_camera_info = roi_msg.left_camera_info
+        masked_msg.center_camera_info = roi_msg.center_camera_info
+        masked_msg.right_camera_info = roi_msg.right_camera_info
+        masked_msg.left_image = built["left"][0]
+        masked_msg.center_image = built["center"][0]
+        masked_msg.right_image = built["right"][0]
+
         self._observation_pub.publish(masked_msg)
-        self._left_image_pub.publish(masked_msg.left_image)
-        self._center_image_pub.publish(masked_msg.center_image)
-        self._right_image_pub.publish(masked_msg.right_image)
+        self._image_pubs["left"].publish(masked_msg.left_image)
+        self._image_pubs["center"].publish(masked_msg.center_image)
+        self._image_pubs["right"].publish(masked_msg.right_image)
         self._publish_count += 1
         if self._publish_count % 20 == 1:
             self._parent_node.get_logger().info(
@@ -128,16 +188,104 @@ class MaskedRoiPublisher:
             ),
         )
 
+    def _plug_bboxes(self) -> dict[str, PlugBbox]:
+        return {
+            "left": self._read_plug_bbox("hil_serl.masked_roi.plug_bbox.left"),
+            "center": self._read_plug_bbox("hil_serl.masked_roi.plug_bbox.center"),
+            "right": self._read_plug_bbox("hil_serl.masked_roi.plug_bbox.right"),
+        }
+
+    def _read_plug_bbox(self, name: str) -> PlugBbox:
+        raw = list(self._parent_node.get_parameter(name).value)
+        if len(raw) != 4:
+            return PlugBbox(0, 0, 0, 0)
+        return PlugBbox(int(raw[0]), int(raw[1]), int(raw[2]), int(raw[3]))
+
     def _clamp_u8_param(self, name: str) -> int:
         value = int(self._parent_node.get_parameter(name).value)
         return int(np.clip(value, 0, 255))
 
 
-def build_masked_roi_image(image_msg: Image, params: MaskedRoiParams) -> Image:
+def build_masked_roi_image(
+    image_msg: Image,
+    params: MaskedRoiParams,
+    plug_bbox: PlugBbox,
+) -> Image:
     """Convert one ROS image into a two-channel masked ROI image."""
     image_bgr = image_msg_to_bgr_array(image_msg)
+    masked_gray, binary_mask = build_masked_gray_and_mask(
+        image_bgr, params, plug_bbox
+    )
+    return _pack_8uc2(image_msg, masked_gray, binary_mask)
+
+
+def _pack_8uc2(
+    source: Image, masked_gray: np.ndarray, binary_mask: np.ndarray
+) -> Image:
+    out_msg = Image()
+    out_msg.header = source.header
+    out_msg.height = source.height
+    out_msg.width = source.width
+    out_msg.encoding = "8UC2"
+    out_msg.is_bigendian = source.is_bigendian
+    out_msg.step = source.width * 2
+    out_msg.data = np.ascontiguousarray(
+        np.dstack((masked_gray, binary_mask))
+    ).tobytes()
+    return out_msg
+
+
+def _pack_mono8(source: Image, image: np.ndarray) -> Image:
+    out_msg = Image()
+    out_msg.header = source.header
+    out_msg.height = source.height
+    out_msg.width = source.width
+    out_msg.encoding = "mono8"
+    out_msg.is_bigendian = source.is_bigendian
+    out_msg.step = source.width
+    out_msg.data = image.astype(np.uint8, copy=False).tobytes()
+    return out_msg
+
+
+def _build_masked_outputs(
+    image_msg: Image,
+    params: MaskedRoiParams,
+    plug_bbox: PlugBbox,
+) -> tuple[Image, np.ndarray, Image, Image]:
+    """Build all four outputs from one image with a single mask computation."""
+    image_bgr = image_msg_to_bgr_array(image_msg)
+    masked_gray, binary_mask = build_masked_gray_and_mask(
+        image_bgr, params, plug_bbox
+    )
+    masked_8uc2 = _pack_8uc2(image_msg, masked_gray, binary_mask)
+    gray_vis = _pack_mono8(image_msg, masked_gray)
+    mask_vis = _pack_mono8(image_msg, binary_mask * 255)
+    return masked_8uc2, binary_mask, gray_vis, mask_vis
+
+
+def build_masked_gray_and_mask(
+    image_bgr: np.ndarray,
+    params: MaskedRoiParams,
+    plug_bbox: PlugBbox,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Build masked grayscale channel and 0/1 mask from a BGR image."""
+    mask = build_blue_mask(image_bgr, params)
+    apply_plug_bbox(mask, plug_bbox)
+    gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
+
+    masked_gray = np.full_like(gray, params.background_value, dtype=np.uint8)
+    masked_gray[mask] = gray[mask]
+    binary_mask = mask.astype(np.uint8)
+    return masked_gray, binary_mask
+
+
+def build_blue_mask(
+    image_bgr: np.ndarray,
+    params: MaskedRoiParams,
+) -> np.ndarray:
+    """Return a boolean mask of blue HSV pixels."""
     hsv = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2HSV)
-    lower = np.asarray(
+    blue_lower = np.asarray(
         [
             min(params.hue_min, params.hue_max),
             params.saturation_min,
@@ -145,27 +293,25 @@ def build_masked_roi_image(image_msg: Image, params: MaskedRoiParams) -> Image:
         ],
         dtype=np.uint8,
     )
-    upper = np.asarray(
+    blue_upper = np.asarray(
         [max(params.hue_min, params.hue_max), 255, 255],
         dtype=np.uint8,
     )
-    mask = cv2.inRange(hsv, lower, upper) > 0
-    gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
+    return cv2.inRange(hsv, blue_lower, blue_upper) > 0
 
-    masked_gray = np.full_like(gray, params.background_value, dtype=np.uint8)
-    masked_gray[mask] = gray[mask]
-    binary_mask = mask.astype(np.uint8)
-    masked_roi = np.dstack((masked_gray, binary_mask))
 
-    out_msg = Image()
-    out_msg.header = image_msg.header
-    out_msg.height = image_msg.height
-    out_msg.width = image_msg.width
-    out_msg.encoding = "8UC2"
-    out_msg.is_bigendian = image_msg.is_bigendian
-    out_msg.step = image_msg.width * 2
-    out_msg.data = np.ascontiguousarray(masked_roi).tobytes()
-    return out_msg
+def apply_plug_bbox(mask: np.ndarray, plug_bbox: PlugBbox) -> None:
+    """Force the fixed plug rectangle into ``mask`` in place."""
+    if plug_bbox.is_empty():
+        return
+    h, w = mask.shape[:2]
+    x_min = max(0, min(plug_bbox.x_min, w))
+    x_max = max(0, min(plug_bbox.x_max, w))
+    y_min = max(0, min(plug_bbox.y_min, h))
+    y_max = max(0, min(plug_bbox.y_max, h))
+    if x_max <= x_min or y_max <= y_min:
+        return
+    mask[y_min:y_max, x_min:x_max] = True
 
 
 def image_msg_to_bgr_array(image_msg: Image) -> np.ndarray:
