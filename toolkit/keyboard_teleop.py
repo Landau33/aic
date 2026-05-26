@@ -52,7 +52,7 @@ AUTO_ALIGN_TOLERANCE_DEG = 0.5
 RANDOM_ALIGN_MAX_DEG = 2.0
 AUTO_MOVE_ABOVE_HEIGHT_MIN = 0.038
 AUTO_MOVE_ABOVE_HEIGHT_MAX = 0.040
-AUTO_MOVE_XY_MAX = 0.003
+AUTO_MOVE_XY_MAX = 0.002
 AUTO_MOVE_W_SIDE_OFFSET = 0.2
 AUTO_MOVE_LINEAR_GAIN = 1.5
 AUTO_MOVE_MAX_LINEAR_VEL = 0.05
@@ -64,7 +64,7 @@ TASK_ANGLE_FRAMES = {
     "trial_1": ("cable_0/sfp_tip_link", "task_board/nic_card_mount_0/sfp_port_0_link"),
     "task2": ("cable_0/sfp_tip_link", "task_board/nic_card_mount_1/sfp_port_0_link"),
     "trial_2": ("cable_0/sfp_tip_link", "task_board/nic_card_mount_1/sfp_port_0_link"),
-    "task3": ("cable_1/sc_tip_link", "task_board/sc_port_0/sc_port_base_link"),
+    "task3": ("cable_1/sc_tip_link", "task_board/sc_port_1/sc_port_base_link"),
     "trial_3": ("cable_1/sc_tip_link", "task_board/sc_port_1/sc_port_base_link"),
 }
 DEFAULT_ANGLE_SOURCE_FRAME, DEFAULT_ANGLE_TARGET_FRAME = TASK_ANGLE_FRAMES[
@@ -344,6 +344,10 @@ class AICKeyboardTeleopNode(Node):
             "insertion_event_topic",
             "/scoring/insertion_event",
         ).value
+        self.command_topic = self.declare_parameter(
+            "command_topic",
+            "/aic_keyboard_teleop/command",
+        ).value
         self._random_align_target_quaternion: np.ndarray | None = None
         self._auto_move_target_position_in_base: np.ndarray | None = None
         self._auto_move_waypoints_in_base: list[np.ndarray] = []
@@ -363,6 +367,12 @@ class AICKeyboardTeleopNode(Node):
             StdString,
             self.insertion_event_topic,
             self._on_insertion_event,
+            10,
+        )
+        self.command_sub = self.create_subscription(
+            StdString,
+            self.command_topic,
+            self._on_command,
             10,
         )
 
@@ -404,29 +414,41 @@ class AICKeyboardTeleopNode(Node):
         else:
             self.get_logger().info("Insertion complete")
 
+    def _on_command(self, msg: StdString):
+        command = str(msg.data).strip().lower()
+        if not command:
+            return
+        for char in command.replace(",", " ").split():
+            if len(char) == 1:
+                self._handle_char_press(char, track_active=False)
+
     def on_key_press(self, key):
         try:
             if hasattr(key, "char") and key.char is not None:
-                char = key.char.lower()
-                if char not in self.active_keys:
-                    if char == "m":
-                        self._toggle_speed_mode()
-                    elif char == "n":
-                        self._toggle_frame_id()
-                    elif char == "z":
-                        self._toggle_auto_align()
-                    elif char == "x":
-                        self._toggle_random_align()
-                    elif char == "c":
-                        self._toggle_move_above_random()
-                    elif char == "r":
-                        self._stop_and_exit()
-                        return
-                    elif char == "t":
-                        self._toggle_pause()
-                self.active_keys.add(char)
+                self._handle_char_press(key.char.lower(), track_active=True)
         except AttributeError:
             return
+
+    def _handle_char_press(self, char: str, *, track_active: bool):
+        if track_active and char in self.active_keys:
+            return
+        if char == "m":
+            self._toggle_speed_mode()
+        elif char == "n":
+            self._toggle_frame_id()
+        elif char == "z":
+            self._toggle_auto_align()
+        elif char == "x":
+            self._toggle_random_align()
+        elif char == "c":
+            self._toggle_move_above_random()
+        elif char == "r":
+            self._stop_and_exit()
+            return
+        elif char == "t":
+            self._toggle_pause()
+        if track_active:
+            self.active_keys.add(char)
 
     def on_key_release(self, key):
         try:
