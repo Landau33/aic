@@ -135,7 +135,10 @@ class MaskedRoiPublisher:
             plug_bboxes = self._plug_bboxes()
             built = {
                 name: _build_masked_outputs(
-                    getattr(roi_msg, f"{name}_image"), params, plug_bboxes[name]
+                    getattr(roi_msg, f"{name}_image"),
+                    params,
+                    plug_bboxes[name],
+                    drop_topmost=name == "left",
                 )
                 for name in ("left", "center", "right")
             }
@@ -207,10 +210,17 @@ def build_masked_roi_image(
     image_msg: Image,
     params: MaskedRoiParams,
     plug_bbox: PlugBbox,
+    *,
+    drop_topmost: bool = False,
 ) -> Image:
     """Convert one ROS image into a bgr8 masked ROI image."""
     image_bgr = image_msg_to_bgr_array(image_msg)
-    masked_bgr, _ = build_masked_rgb_and_mask(image_bgr, params, plug_bbox)
+    masked_bgr, _ = build_masked_rgb_and_mask(
+        image_bgr,
+        params,
+        plug_bbox,
+        drop_topmost=drop_topmost,
+    )
     return _pack_bgr8(image_msg, masked_bgr)
 
 
@@ -242,10 +252,17 @@ def _build_masked_outputs(
     image_msg: Image,
     params: MaskedRoiParams,
     plug_bbox: PlugBbox,
+    *,
+    drop_topmost: bool = False,
 ) -> tuple[Image, Image]:
     """Build the bgr8 masked image and mono8 mask vis from one source image."""
     image_bgr = image_msg_to_bgr_array(image_msg)
-    masked_bgr, binary_mask = build_masked_rgb_and_mask(image_bgr, params, plug_bbox)
+    masked_bgr, binary_mask = build_masked_rgb_and_mask(
+        image_bgr,
+        params,
+        plug_bbox,
+        drop_topmost=drop_topmost,
+    )
     masked_msg = _pack_bgr8(image_msg, masked_bgr)
     mask_vis = _pack_mono8(image_msg, binary_mask * 255)
     return masked_msg, mask_vis
@@ -255,9 +272,13 @@ def build_masked_rgb_and_mask(
     image_bgr: np.ndarray,
     params: MaskedRoiParams,
     plug_bbox: PlugBbox,
+    *,
+    drop_topmost: bool = False,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Apply the mask to the BGR image and return (masked_bgr, 0/1 mask)."""
     mask = build_blue_mask(image_bgr, params)
+    if drop_topmost:
+        mask = drop_topmost_component(mask)
     apply_plug_bbox(mask, plug_bbox)
     mask = fill_mask_polygons(mask)
 
@@ -265,6 +286,21 @@ def build_masked_rgb_and_mask(
     masked[mask] = image_bgr[mask]
     binary_mask = mask.astype(np.uint8)
     return masked, binary_mask
+
+
+def drop_topmost_component(mask: np.ndarray) -> np.ndarray:
+    """Remove the connected component whose bounding box top is highest in the image.
+
+    No-op when fewer than two components exist, so a single plug blob is preserved.
+    """
+    mask_u8 = mask.astype(np.uint8)
+    num, labels, stats, _ = cv2.connectedComponentsWithStats(mask_u8, connectivity=8)
+    if num <= 2:
+        return mask.astype(bool)
+    topmost = 1 + int(np.argmin(stats[1:, cv2.CC_STAT_TOP]))
+    result = mask.astype(bool).copy()
+    result[labels == topmost] = False
+    return result
 
 
 def fill_mask_polygons(mask: np.ndarray) -> np.ndarray:
