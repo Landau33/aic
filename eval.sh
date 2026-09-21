@@ -11,6 +11,7 @@ export __GLX_VENDOR_LIBRARY_NAME=nvidia
 export CUDA_VISIBLE_DEVICES=$GPU_UUID
 export CUDA_DEVICE_ORDER=PCI_BUS_ID
 /entrypoint.sh \
-  ground_truth:=false \
+  ground_truth:=true \
   start_aic_engine:=true \
   aic_engine_config_file:=${CURRENT_CONFIG}
+ 

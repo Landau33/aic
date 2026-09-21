@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
 
 """
-Standalone contact-search controller for AIC cable insertion.
+Standalone compliant insertion controller for AIC cable insertion.
 
-The controller follows a coarse-to-fine local search strategy:
-1. Approach a pre-insert pose derived from the estimated port frame.
-2. Descend slowly until light contact is detected.
-3. Hold a small down-force by publishing position targets with feedforward force.
-4. Probe rx/ry/rz with +/- angular perturbations.
-5. Score each probe by insertion depth gain, lateral force, and torque magnitude.
-6. Update pose toward the better direction and attempt a small insertion.
-7. Back off and retry if the search stagnates.
+The controller keeps a small downward insertion velocity and continuously adjusts
+cartesian velocity from measured force and torque:
+1. Seek light contact if needed.
+2. Insert along -z with low impedance.
+3. Reduce or reverse z velocity when compressive force grows.
+4. Continuously yield in x/y and rx/ry/rz when lateral force or torque rises.
+5. Back off when hard safety limits are exceeded.
 
 Pause control:
 - Press `r` to toggle pause/resume.
@@ -31,8 +30,12 @@ from rclpy.duration import Duration
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.parameter import Parameter
-from scipy.spatial.transform import Rotation as R
 from tf2_ros import Buffer, TransformListener
+
+try:
+    from aic.toolkit.angle_wrench.angle_wrench_model import AngleWrenchModel
+except ImportError:
+    from .angle_wrench.angle_wrench_model import AngleWrenchModel
 
 
 class SearchState(Enum):
@@ -166,11 +169,6 @@ class AICContactSearchNode(Node):
         self.current_wrench_msg = None
         self.current_force_base = np.zeros(3, dtype=np.float64)
         self.current_torque_base = np.zeros(3, dtype=np.float64)
-        self.previous_torque_base = np.zeros(3, dtype=np.float64)
-        self.torque_delta_base = np.zeros(3, dtype=np.float64)
-        self.has_torque_history = False
-        self.sample_window: deque[dict] = deque(maxlen=400)
-
         self.state = SearchState.CONTACT_HOLD
         self.state_started_at = time.monotonic()
         self.previous_auto_state = self.state
@@ -181,6 +179,9 @@ class AICContactSearchNode(Node):
         self.stuck_detected_since = None
         self.last_stuck_warn_time = 0.0
         self.last_relief_axes: set[str] = set()
+        self.insertion_history: deque[tuple[float, float, float]] = deque(maxlen=200)
+        self.angle_wrench_model = self._load_angle_wrench_model()
+        self.last_angle_model_log_time = 0.0
 
         self.keyboard = None
         if self.enable_keyboard_intervention:
@@ -201,21 +202,34 @@ class AICContactSearchNode(Node):
         self.declare_parameter("controller_namespace", "aic_controller")
         self.declare_parameter("frame_id", "base_link")
         self.declare_parameter("tcp_frame", "gripper/tcp")
-        self.declare_parameter("nic_port_frame", "nic_port_rec")
         self.declare_parameter("processed_wrench_topic", "/nic_insertion/processed_wrench/filtered")
         self.declare_parameter("publish_rate", 25.0)
-        self.declare_parameter("seek_velocity_z", -0.0025)
+        self.declare_parameter("seek_velocity_z", -0.01)
+        self.declare_parameter("contact_force_target_z", 6.0)
         self.declare_parameter("contact_force_threshold", 2.0)
-        self.declare_parameter("hold_force_feedforward_z", 4.0)
-        self.declare_parameter("probe_trigger_force_z", 10.0)
-        self.declare_parameter("probe_trigger_force_xy", 10.0)
-        self.declare_parameter("probe_trigger_torque", 3)
-        self.declare_parameter("torque_increase_trigger", 0.12)
-        self.declare_parameter("torque_increase_min_torque", 0.2)
-        self.declare_parameter("relief_linear_gain", 0.0015)
-        self.declare_parameter("relief_angular_gain", 0.08)
-        self.declare_parameter("max_relief_linear_velocity", 0.008)
-        self.declare_parameter("max_relief_angular_velocity", 0.25)
+        self.declare_parameter("force_xy_deadband", 2.0)
+        self.declare_parameter("torque_deadband", 0.15)
+        self.declare_parameter("compliance_force_xy_gain", 0.0015)
+        self.declare_parameter("compliance_force_z_gain", 0.0010)
+        self.declare_parameter("compliance_torque_gain", 0.10)
+        self.declare_parameter("max_insert_velocity_z", 0.01)
+        self.declare_parameter("max_release_velocity_z", 0.004)
+        self.declare_parameter("max_compliance_linear_velocity", 0.010)
+        self.declare_parameter("max_compliance_angular_velocity", 0.30)
+        self.declare_parameter("enable_angle_model_correction", True)
+        self.declare_parameter("angle_wrench_model_path", "")
+        self.declare_parameter("angle_model_min_compressive_force_z", 5.0)
+        self.declare_parameter("angle_model_min_force_z_rise", 0.8)
+        self.declare_parameter("angle_model_stuck_window_sec", 0.45)
+        self.declare_parameter("angle_model_max_z_progress_m", 0.0002)
+        self.declare_parameter("angle_model_gain_rad_per_sec_per_deg", 0.01)
+        self.declare_parameter("angle_model_max_angular_velocity", 0.12)
+        self.declare_parameter("angle_model_axis_signs", [-1.0, -1.0, -1.0])
+        self.declare_parameter("seek_stiffness_diag", [80.0, 80.0, 70.0, 50.0, 50.0, 50.0])
+        self.declare_parameter("seek_damping_diag", [60.0, 60.0, 55.0, 18.0, 18.0, 18.0])
+        self.declare_parameter("contact_stiffness_diag", [45.0, 45.0, 30.0, 18.0, 18.0, 18.0])
+        self.declare_parameter("contact_damping_diag", [35.0, 35.0, 25.0, 12.0, 12.0, 12.0])
+        self.declare_parameter("wrench_feedback_gains", [0.15, 0.15, 0.20, 0.0, 0.0, 0.0])
         self.declare_parameter("stuck_detection_sec", 0.5)
         self.declare_parameter("stuck_warn_interval_sec", 1.0)
         self.declare_parameter("max_force_z", 15.0)
@@ -229,21 +243,37 @@ class AICContactSearchNode(Node):
         self.controller_namespace = self.get_parameter("controller_namespace").value
         self.frame_id = self.get_parameter("frame_id").value
         self.tcp_frame = self.get_parameter("tcp_frame").value
-        self.nic_port_frame = self.get_parameter("nic_port_frame").value
         self.processed_wrench_topic = self.get_parameter("processed_wrench_topic").value
         self.publish_rate = float(self.get_parameter("publish_rate").value)
         self.seek_velocity_z = float(self.get_parameter("seek_velocity_z").value)
+        self.contact_force_target_z = float(self.get_parameter("contact_force_target_z").value)
         self.contact_force_threshold = float(self.get_parameter("contact_force_threshold").value)
-        self.hold_force_feedforward_z = float(self.get_parameter("hold_force_feedforward_z").value)
-        self.probe_trigger_force_z = float(self.get_parameter("probe_trigger_force_z").value)
-        self.probe_trigger_force_xy = float(self.get_parameter("probe_trigger_force_xy").value)
-        self.probe_trigger_torque = float(self.get_parameter("probe_trigger_torque").value)
-        self.torque_increase_trigger = float(self.get_parameter("torque_increase_trigger").value)
-        self.torque_increase_min_torque = float(self.get_parameter("torque_increase_min_torque").value)
-        self.relief_linear_gain = float(self.get_parameter("relief_linear_gain").value)
-        self.relief_angular_gain = float(self.get_parameter("relief_angular_gain").value)
-        self.max_relief_linear_velocity = float(self.get_parameter("max_relief_linear_velocity").value)
-        self.max_relief_angular_velocity = float(self.get_parameter("max_relief_angular_velocity").value)
+        self.force_xy_deadband = float(self.get_parameter("force_xy_deadband").value)
+        self.torque_deadband = float(self.get_parameter("torque_deadband").value)
+        self.compliance_force_xy_gain = float(self.get_parameter("compliance_force_xy_gain").value)
+        self.compliance_force_z_gain = float(self.get_parameter("compliance_force_z_gain").value)
+        self.compliance_torque_gain = float(self.get_parameter("compliance_torque_gain").value)
+        self.max_insert_velocity_z = float(self.get_parameter("max_insert_velocity_z").value)
+        self.max_release_velocity_z = float(self.get_parameter("max_release_velocity_z").value)
+        self.max_compliance_linear_velocity = float(self.get_parameter("max_compliance_linear_velocity").value)
+        self.max_compliance_angular_velocity = float(self.get_parameter("max_compliance_angular_velocity").value)
+        self.enable_angle_model_correction = bool(self.get_parameter("enable_angle_model_correction").value)
+        self.angle_wrench_model_path = str(self.get_parameter("angle_wrench_model_path").value)
+        self.angle_model_min_compressive_force_z = float(self.get_parameter("angle_model_min_compressive_force_z").value)
+        self.angle_model_min_force_z_rise = float(self.get_parameter("angle_model_min_force_z_rise").value)
+        self.angle_model_stuck_window_sec = float(self.get_parameter("angle_model_stuck_window_sec").value)
+        self.angle_model_max_z_progress_m = float(self.get_parameter("angle_model_max_z_progress_m").value)
+        self.angle_model_gain_rad_per_sec_per_deg = float(self.get_parameter("angle_model_gain_rad_per_sec_per_deg").value)
+        self.angle_model_max_angular_velocity = float(self.get_parameter("angle_model_max_angular_velocity").value)
+        self.angle_model_axis_signs = np.asarray(
+            [float(v) for v in self.get_parameter("angle_model_axis_signs").value],
+            dtype=np.float64,
+        )
+        self.seek_stiffness_diag = [float(v) for v in self.get_parameter("seek_stiffness_diag").value]
+        self.seek_damping_diag = [float(v) for v in self.get_parameter("seek_damping_diag").value]
+        self.contact_stiffness_diag = [float(v) for v in self.get_parameter("contact_stiffness_diag").value]
+        self.contact_damping_diag = [float(v) for v in self.get_parameter("contact_damping_diag").value]
+        self.wrench_feedback_gains = [float(v) for v in self.get_parameter("wrench_feedback_gains").value]
         self.stuck_detection_sec = float(self.get_parameter("stuck_detection_sec").value)
         self.stuck_warn_interval_sec = float(self.get_parameter("stuck_warn_interval_sec").value)
         self.max_force_z = float(self.get_parameter("max_force_z").value)
@@ -252,6 +282,24 @@ class AICContactSearchNode(Node):
         self.backoff_distance_m = float(self.get_parameter("backoff_distance_m").value)
         self.backoff_duration_sec = float(self.get_parameter("backoff_duration_sec").value)
         self.enable_keyboard_intervention = bool(self.get_parameter("enable_keyboard_intervention").value)
+        if self.angle_model_axis_signs.size != 3:
+            self.get_logger().warning(
+                "angle_model_axis_signs must have 3 values. Falling back to [-1, -1, -1]."
+            )
+            self.angle_model_axis_signs = np.array([-1.0, -1.0, -1.0], dtype=np.float64)
+
+    def _load_angle_wrench_model(self) -> AngleWrenchModel | None:
+        if not self.enable_angle_model_correction or not self.angle_wrench_model_path:
+            return None
+        try:
+            model = AngleWrenchModel.load(self.angle_wrench_model_path)
+        except Exception as exc:
+            self.get_logger().warning(
+                f"Angle wrench model disabled. Failed to load {self.angle_wrench_model_path}: {exc}"
+            )
+            return None
+        self.get_logger().info(f"Loaded angle wrench model: {self.angle_wrench_model_path}")
+        return model
 
     def wrench_callback(self, msg: WrenchStamped):
         self.current_wrench_msg = msg
@@ -259,28 +307,9 @@ class AICContactSearchNode(Node):
             [msg.wrench.force.x, msg.wrench.force.y, msg.wrench.force.z],
             dtype=np.float64,
         )
-        new_torque_base = np.array(
+        self.current_torque_base = np.array(
             [msg.wrench.torque.x, msg.wrench.torque.y, msg.wrench.torque.z],
             dtype=np.float64,
-        )
-        if self.has_torque_history:
-            self.torque_delta_base = new_torque_base - self.previous_torque_base
-        else:
-            self.torque_delta_base = np.zeros(3, dtype=np.float64)
-            self.has_torque_history = True
-        self.current_torque_base = new_torque_base
-        self.previous_torque_base = new_torque_base.copy()
-
-        tcp_pose = self.get_current_tcp_pose(log_failure=False)
-        if tcp_pose is None:
-            return
-        self.sample_window.append(
-            {
-                "time": time.monotonic(),
-                "force": self.current_force_base.copy(),
-                "torque": self.current_torque_base.copy(),
-                "pose_z": tcp_pose.position.z,
-            }
         )
 
     def timer_callback(self):
@@ -351,7 +380,14 @@ class AICContactSearchNode(Node):
 
         twist = Twist()
         twist.linear.z = self.seek_velocity_z
-        self.motion_pub.publish(self.generate_velocity_update(twist))
+        self.motion_pub.publish(
+            self.generate_velocity_update(
+                twist,
+                stiffness_diag=self.seek_stiffness_diag,
+                damping_diag=self.seek_damping_diag,
+                wrench_feedback_gains=self.wrench_feedback_gains,
+            )
+        )
 
     def _run_contact_hold(self):
         if self.contact_pose is None:
@@ -367,9 +403,26 @@ class AICContactSearchNode(Node):
             )
             return
 
-        twist = self._build_relief_twist()
+        contact_established = self._has_contact()
+        current_pose = self.get_current_tcp_pose(log_failure=False)
+        twist = self._build_compliant_twist(
+            contact_established=contact_established,
+            current_pose=current_pose,
+        )
         self._check_and_warn_if_stuck(twist)
-        self.motion_pub.publish(self.generate_velocity_update(twist))
+        self.motion_pub.publish(
+            self.generate_velocity_update(
+                twist,
+                stiffness_diag=self.contact_stiffness_diag,
+                damping_diag=self.contact_damping_diag,
+                feedforward_wrench=self._build_contact_feedforward_wrench(
+                    contact_established=contact_established
+                ),
+                wrench_feedback_gains=(
+                    self.wrench_feedback_gains if contact_established else [0.0] * 6
+                ),
+            )
+        )
 
     def _run_backoff_retry(self):
         current_pose = self.get_current_tcp_pose()
@@ -377,10 +430,18 @@ class AICContactSearchNode(Node):
             return
         if self.backoff_start_pose is None:
             self.backoff_start_pose = self.copy_pose(current_pose)
-        target_pose = self.copy_pose(self.backoff_start_pose)
-        target_pose.position.z += self.backoff_distance_m
-        msg = self.generate_position_update(target_pose)
-        self.motion_pub.publish(msg)
+
+        twist = Twist()
+        backoff_speed = self.backoff_distance_m / max(self.backoff_duration_sec, 1e-3)
+        twist.linear.z = float(abs(backoff_speed))
+        self.motion_pub.publish(
+            self.generate_velocity_update(
+                twist,
+                stiffness_diag=self.seek_stiffness_diag,
+                damping_diag=self.seek_damping_diag,
+                wrench_feedback_gains=self.wrench_feedback_gains,
+            )
+        )
 
         if time.monotonic() - self.state_started_at < self.backoff_duration_sec:
             return
@@ -398,81 +459,209 @@ class AICContactSearchNode(Node):
             or torque_mag > self.max_torque
         )
 
-    def _build_relief_twist(self) -> Twist:
+    @staticmethod
+    def _apply_deadband(value: float, deadband: float) -> float:
+        if abs(value) <= deadband:
+            return 0.0
+        return float(np.sign(value) * (abs(value) - deadband))
+
+    def _compressive_force_z(self) -> float:
+        insertion_sign = np.sign(self.seek_velocity_z)
+        if insertion_sign == 0.0:
+            return 0.0
+        return float(-self.current_force_base[2] * insertion_sign)
+
+    def _has_contact(self) -> bool:
+        return self._compressive_force_z() >= self.contact_force_threshold
+
+    def _build_compliant_twist(self, contact_established: bool, current_pose: Pose | None) -> Twist:
         twist = Twist()
-        twist.linear.z = self.seek_velocity_z
         active_relief_axes = set()
 
-        if abs(self.current_force_base[0]) >= self.probe_trigger_force_xy:
+        if not contact_established:
+            twist.linear.z = self.seek_velocity_z
+            self.insertion_history.clear()
+            self.last_relief_axes = set()
+            return twist
+
+        fx_eff = self._apply_deadband(self.current_force_base[0], self.force_xy_deadband)
+        fy_eff = self._apply_deadband(self.current_force_base[1], self.force_xy_deadband)
+        mx_eff = self._apply_deadband(self.current_torque_base[0], self.torque_deadband)
+        my_eff = self._apply_deadband(self.current_torque_base[1], self.torque_deadband)
+        mz_eff = self._apply_deadband(self.current_torque_base[2], self.torque_deadband)
+
+        if fx_eff != 0.0:
             active_relief_axes.add("Fx")
             twist.linear.x = float(
                 np.clip(
-                    -self.relief_linear_gain * self.current_force_base[0],
-                    -self.max_relief_linear_velocity,
-                    self.max_relief_linear_velocity,
+                    self.compliance_force_xy_gain * fx_eff,
+                    -self.max_compliance_linear_velocity,
+                    self.max_compliance_linear_velocity,
                 )
             )
-        if abs(self.current_force_base[1]) >= self.probe_trigger_force_xy:
+        if fy_eff != 0.0:
             active_relief_axes.add("Fy")
             twist.linear.y = float(
                 np.clip(
-                    -self.relief_linear_gain * self.current_force_base[1],
-                    -self.max_relief_linear_velocity,
-                    self.max_relief_linear_velocity,
+                    -self.compliance_force_xy_gain * fy_eff,
+                    -self.max_compliance_linear_velocity,
+                    self.max_compliance_linear_velocity,
                 )
             )
-        if self._torque_adjustment_triggered(0):
+        if mx_eff != 0.0:
             active_relief_axes.add("Mx")
             twist.angular.x = float(
                 np.clip(
-                    -self.relief_angular_gain * self.current_torque_base[0],
-                    -self.max_relief_angular_velocity,
-                    self.max_relief_angular_velocity,
+                    -self.compliance_torque_gain * mx_eff,
+                    -self.max_compliance_angular_velocity,
+                    self.max_compliance_angular_velocity,
                 )
             )
-        if self._torque_adjustment_triggered(1):
+        if my_eff != 0.0:
             active_relief_axes.add("My")
             twist.angular.y = float(
                 np.clip(
-                    -self.relief_angular_gain * self.current_torque_base[1],
-                    -self.max_relief_angular_velocity,
-                    self.max_relief_angular_velocity,
+                    -self.compliance_torque_gain * my_eff,
+                    -self.max_compliance_angular_velocity,
+                    self.max_compliance_angular_velocity,
                 )
             )
-        if self._torque_adjustment_triggered(2):
+        if mz_eff != 0.0:
             active_relief_axes.add("Mz")
             twist.angular.z = float(
                 np.clip(
-                    -self.relief_angular_gain * self.current_torque_base[2],
-                    -self.max_relief_angular_velocity,
-                    self.max_relief_angular_velocity,
+                    -self.compliance_torque_gain * mz_eff,
+                    -self.max_compliance_angular_velocity,
+                    self.max_compliance_angular_velocity,
                 )
             )
 
-        if (
-            abs(self.current_force_base[2]) >= self.probe_trigger_force_z
-            or abs(twist.angular.x) > 0.0
-            or abs(twist.angular.y) > 0.0
-            or abs(twist.angular.z) > 0.0
-        ):
+        insertion_sign = np.sign(self.seek_velocity_z)
+        compressive_force = self._compressive_force_z()
+        force_error_z = self.contact_force_target_z - compressive_force
+        if abs(force_error_z) > 0.0:
             active_relief_axes.add("Fz")
-            twist.linear.z = float(0.5 * self.seek_velocity_z)
-
-        self._log_relief_trigger(active_relief_axes)
-        return twist
-
-    def _torque_adjustment_triggered(self, axis_idx: int) -> bool:
-        current_abs = abs(self.current_torque_base[axis_idx])
-        delta_abs = abs(self.torque_delta_base[axis_idx])
-        return (
-            current_abs >= self.probe_trigger_torque
-            or (
-                current_abs >= self.torque_increase_min_torque
-                and delta_abs >= self.torque_increase_trigger
+        twist.linear.z = float(
+            np.clip(
+                self.seek_velocity_z + insertion_sign * self.compliance_force_z_gain * force_error_z,
+                -abs(self.max_insert_velocity_z),
+                abs(self.max_release_velocity_z),
             )
         )
+        angle_model_velocity, predicted_angle_deg = self._angle_model_correction(
+            current_pose=current_pose,
+            compressive_force=compressive_force,
+        )
+        if angle_model_velocity is not None:
+            twist.angular.x = float(
+                np.clip(
+                    twist.angular.x + angle_model_velocity[0],
+                    -self.max_compliance_angular_velocity,
+                    self.max_compliance_angular_velocity,
+                )
+            )
+            twist.angular.y = float(
+                np.clip(
+                    twist.angular.y + angle_model_velocity[1],
+                    -self.max_compliance_angular_velocity,
+                    self.max_compliance_angular_velocity,
+                )
+            )
+            twist.angular.z = float(
+                np.clip(
+                    twist.angular.z + angle_model_velocity[2],
+                    -self.max_compliance_angular_velocity,
+                    self.max_compliance_angular_velocity,
+                )
+            )
+            active_relief_axes.add("NN")
+            self._log_angle_model_activity(predicted_angle_deg, angle_model_velocity)
 
-    def _log_relief_trigger(self, active_relief_axes: set[str]):
+        self._log_compliance_activity(active_relief_axes, twist, compressive_force, force_error_z)
+        return twist
+
+    def _angle_model_correction(
+        self,
+        current_pose: Pose | None,
+        compressive_force: float,
+    ) -> tuple[np.ndarray | None, np.ndarray | None]:
+        if self.angle_wrench_model is None or current_pose is None:
+            return None, None
+        now = time.monotonic()
+        self.insertion_history.append((now, current_pose.position.z, compressive_force))
+        while (
+            self.insertion_history
+            and now - self.insertion_history[0][0] > self.angle_model_stuck_window_sec
+        ):
+            self.insertion_history.popleft()
+        if len(self.insertion_history) < 2:
+            return None, None
+        oldest_time, oldest_z, oldest_force = self.insertion_history[0]
+        if now - oldest_time < 0.5 * self.angle_model_stuck_window_sec:
+            return None, None
+        insertion_sign = np.sign(self.seek_velocity_z)
+        z_progress = (current_pose.position.z - oldest_z) * insertion_sign
+        force_rise = compressive_force - oldest_force
+        likely_angle_stuck = (
+            compressive_force >= self.angle_model_min_compressive_force_z
+            and force_rise >= self.angle_model_min_force_z_rise
+            and z_progress <= self.angle_model_max_z_progress_m
+        )
+        if not likely_angle_stuck:
+            return None, None
+        predicted_angle_deg = self.angle_wrench_model.predict_angle_deg(
+            self.current_force_base,
+            self.current_torque_base,
+        )
+        angular_velocity = np.clip(
+            self.angle_model_axis_signs
+            * self.angle_model_gain_rad_per_sec_per_deg
+            * predicted_angle_deg,
+            -self.angle_model_max_angular_velocity,
+            self.angle_model_max_angular_velocity,
+        )
+        return angular_velocity, predicted_angle_deg
+
+    def _log_angle_model_activity(
+        self,
+        predicted_angle_deg: np.ndarray | None,
+        angular_velocity: np.ndarray,
+    ):
+        now = time.monotonic()
+        if now - self.last_angle_model_log_time < self.stuck_warn_interval_sec:
+            return
+        self.last_angle_model_log_time = now
+        if predicted_angle_deg is None:
+            return
+        self.get_logger().info(
+            "Angle model correction: "
+            f"pred_angle_deg=[{predicted_angle_deg[0]:+.2f}, {predicted_angle_deg[1]:+.2f}, {predicted_angle_deg[2]:+.2f}] "
+            f"cmd_angular=[{angular_velocity[0]:+.4f}, {angular_velocity[1]:+.4f}, {angular_velocity[2]:+.4f}]"
+        )
+
+    def _build_contact_feedforward_wrench(self, contact_established: bool) -> Wrench:
+        if not contact_established:
+            return Wrench(
+                force=Vector3(x=0.0, y=0.0, z=0.0),
+                torque=Vector3(x=0.0, y=0.0, z=0.0),
+            )
+        insertion_sign = np.sign(self.seek_velocity_z)
+        return Wrench(
+            force=Vector3(
+                x=0.0,
+                y=0.0,
+                z=float(insertion_sign * self.contact_force_target_z),
+            ),
+            torque=Vector3(x=0.0, y=0.0, z=0.0),
+        )
+
+    def _log_compliance_activity(
+        self,
+        active_relief_axes: set[str],
+        twist: Twist,
+        compressive_force: float,
+        force_error_z: float,
+    ):
         new_axes = active_relief_axes - self.last_relief_axes
         if not new_axes:
             self.last_relief_axes = active_relief_axes
@@ -485,36 +674,34 @@ class AICContactSearchNode(Node):
             elif axis == "Fy":
                 details.append(f"Fy={self.current_force_base[1]:+.2f}")
             elif axis == "Fz":
-                details.append(f"Fz={self.current_force_base[2]:+.2f}")
+                details.append(
+                    f"Fz={self.current_force_base[2]:+.2f}, Fz_comp={compressive_force:+.2f}, dFz={force_error_z:+.2f}"
+                )
             elif axis == "Mx":
-                details.append(
-                    f"Mx={self.current_torque_base[0]:+.2f}, dMx={self.torque_delta_base[0]:+.2f}"
-                )
+                details.append(f"Mx={self.current_torque_base[0]:+.2f}")
             elif axis == "My":
-                details.append(
-                    f"My={self.current_torque_base[1]:+.2f}, dMy={self.torque_delta_base[1]:+.2f}"
-                )
+                details.append(f"My={self.current_torque_base[1]:+.2f}")
             elif axis == "Mz":
-                details.append(
-                    f"Mz={self.current_torque_base[2]:+.2f}, dMz={self.torque_delta_base[2]:+.2f}"
-                )
+                details.append(f"Mz={self.current_torque_base[2]:+.2f}")
 
         self.get_logger().info(
-            "Relief triggered on "
+            "Compliance active on "
             f"{', '.join(sorted(new_axes))}: "
             + "; ".join(details)
+            + f" cmd=[{twist.linear.x:+.4f}, {twist.linear.y:+.4f}, {twist.linear.z:+.4f}; "
+            + f"{twist.angular.x:+.4f}, {twist.angular.y:+.4f}, {twist.angular.z:+.4f}]"
         )
         self.last_relief_axes = active_relief_axes
 
     def _check_and_warn_if_stuck(self, twist: Twist):
         linear_saturated = (
-            abs(twist.linear.x) >= 0.95 * self.max_relief_linear_velocity
-            or abs(twist.linear.y) >= 0.95 * self.max_relief_linear_velocity
+            abs(twist.linear.x) >= 0.95 * self.max_compliance_linear_velocity
+            or abs(twist.linear.y) >= 0.95 * self.max_compliance_linear_velocity
         )
         angular_saturated = (
-            abs(twist.angular.x) >= 0.95 * self.max_relief_angular_velocity
-            or abs(twist.angular.y) >= 0.95 * self.max_relief_angular_velocity
-            or abs(twist.angular.z) >= 0.95 * self.max_relief_angular_velocity
+            abs(twist.angular.x) >= 0.95 * self.max_compliance_angular_velocity
+            or abs(twist.angular.y) >= 0.95 * self.max_compliance_angular_velocity
+            or abs(twist.angular.z) >= 0.95 * self.max_compliance_angular_velocity
         )
         correction_active = bool(self.last_relief_axes)
         likely_stuck = correction_active and (linear_saturated or angular_saturated)
@@ -529,7 +716,7 @@ class AICContactSearchNode(Node):
             ):
                 self.last_stuck_warn_time = now
                 self.get_logger().warning(
-                    "Stuck: relief command is saturated but force/torque is still high. "
+                    "Stuck: compliant command is saturated but force/torque is still high. "
                     f"force=[{self.current_force_base[0]:.2f}, {self.current_force_base[1]:.2f}, {self.current_force_base[2]:.2f}] "
                     f"torque=[{self.current_torque_base[0]:.2f}, {self.current_torque_base[1]:.2f}, {self.current_torque_base[2]:.2f}]"
                 )
@@ -601,18 +788,29 @@ class AICContactSearchNode(Node):
         )
         return _quat_xyzw_to_euler_xyz_degrees(relative_quat)
 
-    def generate_velocity_update(self, twist: Twist) -> MotionUpdate:
+    def generate_velocity_update(
+        self,
+        twist: Twist,
+        stiffness_diag: list[float] | None = None,
+        damping_diag: list[float] | None = None,
+        feedforward_wrench: Wrench | None = None,
+        wrench_feedback_gains: list[float] | None = None,
+    ) -> MotionUpdate:
         msg = MotionUpdate()
         msg.header.stamp = self.get_clock().now().to_msg()
         msg.header.frame_id = self.frame_id
         msg.velocity = twist
-        msg.target_stiffness = np.diag([85.0, 85.0, 85.0, 85.0, 85.0, 85.0]).flatten().tolist()
-        msg.target_damping = np.diag([75.0, 75.0, 75.0, 75.0, 75.0, 75.0]).flatten().tolist()
-        msg.feedforward_wrench_at_tip = Wrench(
+        if stiffness_diag is None:
+            stiffness_diag = self.contact_stiffness_diag
+        if damping_diag is None:
+            damping_diag = self.contact_damping_diag
+        msg.target_stiffness = np.diag(stiffness_diag).flatten().tolist()
+        msg.target_damping = np.diag(damping_diag).flatten().tolist()
+        msg.feedforward_wrench_at_tip = feedforward_wrench or Wrench(
             force=Vector3(x=0.0, y=0.0, z=0.0),
             torque=Vector3(x=0.0, y=0.0, z=0.0),
         )
-        msg.wrench_feedback_gains_at_tip = [0.0] * 6
+        msg.wrench_feedback_gains_at_tip = wrench_feedback_gains or [0.0] * 6
         msg.trajectory_generation_mode.mode = TrajectoryGenerationMode.MODE_VELOCITY
         return msg
 
